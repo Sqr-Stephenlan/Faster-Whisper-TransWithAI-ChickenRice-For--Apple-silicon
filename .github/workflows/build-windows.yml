@@ -22,6 +22,8 @@ jobs:
       run:
         shell: bash -el {0}  # Important for conda activation on Windows
     strategy:
+      # Cap concurrent build jobs to 3 at a time (shared by CI and release).
+      max-parallel: 3
       matrix:
         include:
           # CUDA 11.8 versions
