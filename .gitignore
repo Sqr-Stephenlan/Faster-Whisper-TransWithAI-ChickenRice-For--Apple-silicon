@@ -199,4 +199,7 @@ desktop.ini
 # omo
 .omo/
 
+# Claude Code
+.claude/
+
 models/
