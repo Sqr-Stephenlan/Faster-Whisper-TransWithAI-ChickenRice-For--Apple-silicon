@@ -8,6 +8,9 @@ import argparse
 import os
 import shutil
 import sys
+import time
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from urllib.parse import urljoin
 
@@ -77,6 +80,32 @@ if sys.platform == "win32" and not USE_UNICODE:
         pass  # If this fails, we'll use ASCII symbols anyway
 
 
+DOWNLOAD_MAX_RETRIES = 5
+DOWNLOAD_RETRY_BACKOFF_SECONDS = 1.0
+DOWNLOAD_MAX_RETRY_DELAY_SECONDS = 30.0
+
+
+def _get_429_retry_delay(response: requests.Response, retry_index: int) -> float:
+    retry_after = response.headers.get("Retry-After")
+    if retry_after:
+        try:
+            delay = float(retry_after)
+        except ValueError:
+            try:
+                retry_at = parsedate_to_datetime(retry_after)
+                if retry_at.tzinfo is None:
+                    retry_at = retry_at.replace(tzinfo=timezone.utc)
+                delay = (retry_at - datetime.now(timezone.utc)).total_seconds()
+            except (TypeError, ValueError, IndexError, OverflowError):
+                delay = 0.0
+
+        if delay > 0:
+            return min(delay, DOWNLOAD_MAX_RETRY_DELAY_SECONDS)
+
+    exponential_delay = DOWNLOAD_RETRY_BACKOFF_SECONDS * (2**retry_index)
+    return min(exponential_delay, DOWNLOAD_MAX_RETRY_DELAY_SECONDS)
+
+
 def download_file(url: str, dest_path: Path, session: requests.Session | None = None) -> bool:
     """Download a file with progress indicator"""
     if session is None:
@@ -93,8 +122,24 @@ def download_file(url: str, dest_path: Path, session: requests.Session | None = 
 
         print(f"  {DOWNLOAD} Downloading {dest_path.name}...", end=" ")
 
-        response = session.get(url, stream=True, timeout=30)
-        response.raise_for_status()
+        response = None
+        for retry_index in range(DOWNLOAD_MAX_RETRIES + 1):
+            response = session.get(url, stream=True, timeout=30)
+            if response.status_code != 429 or retry_index == DOWNLOAD_MAX_RETRIES:
+                response.raise_for_status()
+                break
+
+            retry_delay = _get_429_retry_delay(response, retry_index)
+            response.close()
+            print(
+                f"\r  {WARNING} Rate limited while downloading {dest_path.name}; "
+                f"retrying in {retry_delay:.1f}s ({retry_index + 1}/{DOWNLOAD_MAX_RETRIES})"
+            )
+            time.sleep(retry_delay)
+            print(f"  {DOWNLOAD} Downloading {dest_path.name}...", end=" ")
+
+        if response is None:
+            raise RuntimeError("Download did not start")
 
         # Get file size
         total_size = int(response.headers.get("content-length", 0))
