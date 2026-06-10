@@ -3,6 +3,10 @@
     // You can control various subtitle generation parameters here, all parameters in the link below can be controlled
     // https://github.com/SYSTRAN/faster-whisper/blob/dea24cbcc6cbef23ff599a63be0bbb647a0b23d6/faster_whisper/transcribe.py#L733
 
+    // Whisper任务：translate = 翻译输出，transcribe = 原文转写
+    // Whisper task: translate = translated output, transcribe = same-language transcript
+    "task": "translate",
+
     // VAD 参数设置 (使用改进的 whisper_vad 模型)
     // VAD parameters (using improved whisper_vad model)
     "vad_parameters": {

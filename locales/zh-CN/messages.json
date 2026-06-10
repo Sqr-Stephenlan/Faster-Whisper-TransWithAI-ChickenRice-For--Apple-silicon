@@ -12,6 +12,7 @@
     "audio_extensions": "要处理的音频文件扩展名列表（逗号分隔）",
     "subtitle_formats": "字幕格式列表（逗号分隔）：lrc, srt, vtt, txt",
     "output_dir": "字幕文件输出目录",
+    "task": "Whisper任务：translate 或 transcribe（覆盖配置文件）",
     "config_file": "生成配置文件路径",
     "log_level": "日志级别",
     "vad_threshold": "覆盖VAD阈值",
@@ -28,12 +29,13 @@
     "vad_activated": "✓ 增强VAD已激活（阈值={threshold}）",
     "loading_whisper": "正在加载Whisper模型...",
     "model_precision": "模型运行精度：{precision}，设备：{device}",
+    "processing": "正在处理（{task}，{current}/{total}）：{path}",
     "translating": "正在翻译（{current}/{total}）：{path}",
     "duration": "时长：{duration}",
     "duration_filtered": "时长：{original} → {filtered}（检测到 {percent} 语音）",
     "writing": "正在写入：{path}",
     "vad_deactivated": "VAD注入已停用",
-    "no_files_found": "未找到要翻译的文件",
+    "no_files_found": "未找到要处理的文件",
     "logging_to_file": "日志文件：{path}",
     "program_version": "程序版本：{version}",
     "python_version": "Python版本：{version}",
@@ -47,6 +49,10 @@
     "translation": {
       "one": "翻译任务：{count}",
       "other": "翻译任务：{count}"
+    },
+    "processing": {
+      "one": "处理任务（{task}）：{count}",
+      "other": "处理任务（{task}）：{count}"
     }
   },
 
@@ -62,8 +68,8 @@
   },
 
   "warnings": {
-    "provide_directories": "请提供要翻译的目录",
-    "drag_files": "请将要翻译的文件或目录拖放到此程序上",
+    "provide_directories": "请提供要处理的目录",
+    "drag_files": "请将要处理的文件或目录拖放到此程序上",
     "unknown_format": "未知格式：{format}",
     "loaded_vad_config": "已从 {path} 加载VAD配置",
     "failed_load_vad": "无法从 {path} 加载VAD元数据：{error}",

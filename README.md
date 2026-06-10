@@ -201,11 +201,16 @@ python modal_infer.py
 
 # 调整日志级别
 --log_level="INFO"
+
+# 覆盖 Whisper 任务（translate 或 transcribe）
+--task="transcribe"
 ```
 
 ### 转录参数调整
 
 编辑 `generation_config.json5` 文件调整转录参数。
+
+`generation_config.json5` 中可设置 `"task": "translate"` 或 `"task": "transcribe"`。命令行 `--task` 会覆盖配置文件中的 `task`。
 
 参数详情请参考 [Faster Whisper 文档](https://github.com/SYSTRAN/faster-whisper/blob/dea24cbcc6cbef23ff599a63be0bbb647a0b23d6/faster_whisper/transcribe.py#L733)
 

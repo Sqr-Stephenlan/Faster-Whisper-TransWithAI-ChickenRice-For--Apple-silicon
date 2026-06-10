@@ -12,6 +12,7 @@
     "audio_extensions": "Comma-separated list of audio file extensions to process",
     "subtitle_formats": "Comma-separated list of subtitle formats (lrc, srt, vtt, txt)",
     "output_dir": "Output directory for subtitle files",
+    "task": "Whisper task to run: translate or transcribe (overrides config file)",
     "config_file": "Path to generation config file",
     "log_level": "Logging level",
     "vad_threshold": "Override VAD threshold",
@@ -28,12 +29,13 @@
     "vad_activated": "✓ Enhanced VAD activated (threshold={threshold})",
     "loading_whisper": "Loading Whisper model...",
     "model_precision": "Model running with precision: {precision} on device: {device}",
+    "processing": "Processing ({task}) ({current}/{total}): {path}",
     "translating": "Translating ({current}/{total}): {path}",
     "duration": "Duration: {duration}",
     "duration_filtered": "Duration: {original} → {filtered} ({percent} speech detected)",
     "writing": "Writing: {path}",
     "vad_deactivated": "VAD injection deactivated",
-    "no_files_found": "No files found to translate",
+    "no_files_found": "No files found to process",
     "logging_to_file": "Logging to file: {path}",
     "program_version": "Program version: {version}",
     "python_version": "Python version: {version}",
@@ -47,6 +49,10 @@
     "translation": {
       "one": "Translation task: {count}",
       "other": "Translation tasks: {count}"
+    },
+    "processing": {
+      "one": "Processing task ({task}): {count}",
+      "other": "Processing tasks ({task}): {count}"
     }
   },
 
@@ -62,8 +68,8 @@
   },
 
   "warnings": {
-    "provide_directories": "Please provide directories to translate",
-    "drag_files": "Please drag files or directories to translate onto this program",
+    "provide_directories": "Please provide directories to process",
+    "drag_files": "Please drag files or directories to process onto this program",
     "unknown_format": "Unknown format: {format}",
     "loaded_vad_config": "Loaded VAD configuration from {path}",
     "failed_load_vad": "Failed to load VAD metadata from {path}: {error}",

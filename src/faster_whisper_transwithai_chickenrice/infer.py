@@ -48,6 +48,18 @@ _ = i18n._
 format_duration = i18n.format_duration
 format_percentage = i18n.format_percentage
 
+WHISPER_TASKS = ("transcribe", "translate")
+
+
+def _normalize_whisper_task(task: Any) -> str:
+    if not isinstance(task, str):
+        raise ValueError(f"Whisper task must be one of {', '.join(WHISPER_TASKS)}")
+
+    normalized = task.strip().lower()
+    if normalized not in WHISPER_TASKS:
+        raise ValueError(f"Invalid Whisper task '{task}'. Expected one of: {', '.join(WHISPER_TASKS)}")
+    return normalized
+
 
 def _require_ctranslate2():
     if ctranslate2 is None:
@@ -81,6 +93,13 @@ def parse_arguments():
     )
     parser.add_argument("--sub_formats", type=str, default="lrc,vtt", help=_("args.subtitle_formats"))
     parser.add_argument("--output_dir", type=str, default=None, help=_("args.output_dir"))
+    parser.add_argument(
+        "--task",
+        type=str,
+        choices=WHISPER_TASKS,
+        default=None,
+        help=_("args.task"),
+    )
     parser.add_argument(
         "--generation_config",
         type=str,
@@ -460,6 +479,8 @@ class Inference:
                     )
                 config = dict(**ChainMap(file_config, config))
 
+        config["task"] = _normalize_whisper_task(args.task if args.task is not None else config.get("task"))
+
         # Process VAD parameters from config file
         if "vad_parameters" in config:
             vad_params = config.pop("vad_parameters")
@@ -617,7 +638,7 @@ class Inference:
             logger.info(_("info.no_files_found"))
             return
 
-        logger.info(_("tasks.translation", count=len(tasks)))
+        logger.info(_("tasks.processing", count=len(tasks), task=self.generation_config["task"]))
         logger.info(_("info.loading_whisper"))
 
         try:
@@ -662,7 +683,8 @@ class Inference:
             for i, task in enumerate(tasks):
                 logger.info(
                     _(
-                        "info.translating",
+                        "info.processing",
+                        task=self.generation_config["task"],
                         current=i + 1,
                         total=len(tasks),
                         path=task.audio_path,

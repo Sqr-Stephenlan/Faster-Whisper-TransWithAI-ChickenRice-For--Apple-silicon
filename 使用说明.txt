@@ -56,9 +56,12 @@ GPU模式（仅限NVIDIA显卡）:
 --audio_suffixes="mp3,wav" : 自定义处理的文件格式
 --sub_formats="srt,vtt,lrc" : 自定义输出格式
 --log_level="INFO" : 减少控制台输出（默认为DEBUG）
+--task="transcribe" : 覆盖Whisper任务（translate=翻译，transcribe=转录）
 
 2. 生成参数调整（高级）:
 编辑 generation_config.json5 文件调整转录参数。
+可在 generation_config.json5 中设置 "task": "translate" 或 "task": "transcribe"。
+命令行 --task 参数优先级更高，会覆盖配置文件中的 task。
 参数详情见下方相关项目链接。
 
 补充：字幕合并/去重（segment_merge）
