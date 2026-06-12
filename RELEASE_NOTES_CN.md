@@ -230,6 +230,9 @@ A: 使用"低显存模式"批处理文件，或切换到CPU模式。
 
 ## 📝 更新日志
 
+### v1.9 (2026-06-12)
+- 🎯 **转录时间轴稳定性修复**：改用外部 VAD（`VadModelManager`）预先计算语音区间，并以 `clip_timestamps` 显式传入 faster-whisper，替代其内部 `vad_filter`；在批处理与非批处理模式下都能避免 Whisper 时间戳坍缩/错乱，字幕时间轴更稳定
+
 ### v1.8 (2026-06-10)
 - 📝 **日文原文转录支持**：新增 [Jim6789/whisper-ja-1.5B-ct2](https://huggingface.co/Jim6789/whisper-ja-1.5B-ct2) 日文原文转录模型，无需翻译即可直接输出日文字幕
 - 📦 **三种发行包变体**：将原"基础版/海南鸡版"重构为 **无主模型版（`-nomodel`）**、**翻译版（`-translate`）**、**转录版（`-transcribe`）** 三种打包，按需下载

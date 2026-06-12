@@ -1341,7 +1341,7 @@ def main():
     logger.addHandler(file_handler)
 
     logger.info(_("info.logging_to_file").format(path=log_file_path))
-    logger.info(_("info.program_version").format(version="v1.7"))
+    logger.info(_("info.program_version").format(version="v1.9"))
     logger.info(_("info.python_version").format(version=sys.version))
     logger.info(_("info.platform").format(platform=platform.platform()))
     logger.info(_("info.arguments").format(args=vars(args)))
