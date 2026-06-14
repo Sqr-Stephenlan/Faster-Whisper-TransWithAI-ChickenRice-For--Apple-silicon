@@ -35,6 +35,14 @@
 
     "repetition_penalty": 1.1,
 
+    // 智能VAD切分：先用外层VAD选择安全的连续音频块，再在每个块内启用 faster-whisper 内部VAD
+    // Smart VAD split: outer VAD chooses safe contiguous chunks, then faster-whisper internal VAD runs inside each chunk
+    "smart_split_with_vad": true,
+
+    // 每个智能切分块的目标时长（秒），最大30秒
+    // Target duration for each smart split chunk (seconds), capped at 30 seconds
+    "target_chunk_duration_s": 30,
+
     // 字幕后处理：合并重复/重叠片段，避免字幕时间轴过长
     // Subtitle post-processing: merge repeated/overlapping segments and avoid overly long timelines
     "segment_merge": {

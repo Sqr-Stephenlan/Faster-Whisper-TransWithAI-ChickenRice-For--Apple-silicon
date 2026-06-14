@@ -11,7 +11,15 @@ sys.modules.setdefault("pyjson5", types.SimpleNamespace(decode_io=json.load))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import faster_whisper_transwithai_chickenrice.infer as infer_module
-from faster_whisper_transwithai_chickenrice.infer import Inference, vad_segments_to_clip_timestamps
+from faster_whisper_transwithai_chickenrice.infer import (
+    AudioChunk,
+    Inference,
+    Segment,
+    SpeechSpan,
+    create_contiguous_chunks,
+    enforce_segment_timeline,
+    vad_segments_to_clip_timestamps,
+)
 
 
 def make_args(config_path: Path, task: str | None = None) -> Namespace:
@@ -25,6 +33,8 @@ def make_args(config_path: Path, task: str | None = None) -> Namespace:
         merge_segments=None,
         merge_max_gap_ms=None,
         merge_max_duration_ms=None,
+        smart_split_with_vad=None,
+        target_chunk_duration_s=None,
     )
 
 
@@ -35,7 +45,9 @@ class WhisperTaskConfigTests(unittest.TestCase):
             config_path.write_text(config_text, encoding="utf-8")
 
             inference = Inference.__new__(Inference)
-            config, _segment_merge_options = inference._load_generation_config(make_args(config_path, task=task))
+            config, _segment_merge_options, _smart_split_options = inference._load_generation_config(
+                make_args(config_path, task=task)
+            )
             return config
 
     def test_uses_task_from_generation_config(self) -> None:
@@ -61,7 +73,9 @@ class WhisperTaskConfigTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp_dir:
             config_path = Path(tmp_dir) / "missing.json5"
             inference = Inference.__new__(Inference)
-            config, _segment_merge_options = inference._load_generation_config(make_args(config_path))
+            config, _segment_merge_options, _smart_split_options = inference._load_generation_config(
+                make_args(config_path)
+            )
 
         self.assertEqual(config["task"], "translate")
 
@@ -77,7 +91,7 @@ class VadClipTimestampTests(unittest.TestCase):
 
         self.assertEqual(clips, [{"start": 1.0, "end": 2.0}])
 
-    def test_prepare_transcription_uses_vad_clips_for_translate(self) -> None:
+    def test_prepare_transcription_uses_vad_clips_when_smart_split_disabled(self) -> None:
         inference = Inference.__new__(Inference)
         inference.generation_config = {
             "language": "ja",
@@ -85,6 +99,7 @@ class VadClipTimestampTests(unittest.TestCase):
             "vad_filter": True,
             "vad_parameters": {"threshold": 0.5},
         }
+        inference.smart_split_options = infer_module.SmartSplitOptions(enabled=False)
         inference.vad_manager = mock.Mock()
         inference.vad_manager.get_speech_timestamps.return_value = [{"start": 16_000, "end": 32_000}]
 
@@ -97,6 +112,73 @@ class VadClipTimestampTests(unittest.TestCase):
         self.assertEqual(config["clip_timestamps"], [1.0, 2.0])
         self.assertEqual(config["beam_size"], 1)
         self.assertFalse(config["condition_on_previous_text"])
+
+
+class SmartSplitTests(unittest.TestCase):
+    def test_create_contiguous_chunks_prefers_silence_near_target_end(self) -> None:
+        chunks = create_contiguous_chunks(
+            [
+                SpeechSpan(0.0, 8.0),
+                SpeechSpan(12.0, 20.0),
+                SpeechSpan(26.0, 35.0),
+            ],
+            max_duration=30.0,
+            total_duration=40.0,
+        )
+
+        self.assertEqual(chunks[0], AudioChunk(0, 0.0, 23.0))
+        self.assertEqual(chunks[1], AudioChunk(1, 23.0, 40.0))
+
+    def test_enforce_segment_timeline_caps_and_removes_overlaps(self) -> None:
+        segments = [
+            Segment(start=1_000, end=30_000, text="first"),
+            Segment(start=2_000, end=4_000, text="overlap"),
+            Segment(start=5_000, end=5_000, text="empty"),
+        ]
+
+        normalized = enforce_segment_timeline(segments, max_duration_ms=20_000)
+
+        self.assertEqual(normalized, [Segment(start=1_000, end=21_000, text="first")])
+
+    def test_smart_chunk_transcription_runs_internal_vad_per_chunk(self) -> None:
+        inference = Inference.__new__(Inference)
+        inference.generation_config = {
+            "language": "ja",
+            "task": "translate",
+            "vad_filter": True,
+            "vad_parameters": {"threshold": 0.5},
+        }
+        inference.smart_split_options = infer_module.SmartSplitOptions(enabled=True, target_chunk_duration_s=2.0)
+        inference.vad_manager = mock.Mock()
+        inference.vad_manager.get_speech_timestamps.return_value = [
+            {"start": 0, "end": 16_000},
+            {"start": 48_000, "end": 64_000},
+        ]
+
+        class FakeModel:
+            def __init__(self) -> None:
+                self.calls = []
+
+            def transcribe(self, audio, **config):
+                self.calls.append((len(audio), dict(config)))
+                index = len(self.calls)
+                segment = mock.Mock(start=0.0, end=0.5, text=f"chunk {index}")
+                return [segment], mock.Mock(duration=len(audio) / 16_000, duration_after_vad=0.5)
+
+        model = FakeModel()
+        task = mock.Mock(audio_path="audio.mp3")
+
+        with mock.patch.object(infer_module, "decode_audio", return_value=[0.0] * 80_000):
+            segments, info = inference._transcribe_smart_chunks(model, task)
+
+        self.assertEqual(len(model.calls), 3)
+        self.assertTrue(all(call_config["vad_filter"] for _length, call_config in model.calls))
+        self.assertNotIn("clip_timestamps", model.calls[0][1])
+        self.assertEqual(segments[0], Segment(start=0, end=500, text="chunk 1"))
+        self.assertEqual(segments[1], Segment(start=2_000, end=2_500, text="chunk 2"))
+        self.assertEqual(segments[2], Segment(start=4_000, end=4_500, text="chunk 3"))
+        self.assertEqual(info.duration, 5.0)
+        self.assertEqual(info.duration_after_vad, 1.5)
 
 
 if __name__ == "__main__":

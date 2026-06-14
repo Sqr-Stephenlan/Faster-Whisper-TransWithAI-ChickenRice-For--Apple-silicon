@@ -53,6 +53,7 @@ format_percentage = i18n.format_percentage
 
 WHISPER_TASKS = ("transcribe", "translate")
 WHISPER_SAMPLING_RATE = 16_000
+MAX_SMART_CHUNK_DURATION_S = 30.0
 
 
 def _normalize_whisper_task(task: Any) -> str:
@@ -138,6 +139,18 @@ def parse_arguments():
         type=int,
         default=None,
         help="Max duration (ms) of a merged segment (override config file)",
+    )
+    parser.add_argument(
+        "--smart_split_with_vad",
+        type=str,
+        default=None,
+        help="Enable smart outer VAD chunking before faster-whisper internal VAD (true/false)",
+    )
+    parser.add_argument(
+        "--target_chunk_duration_s",
+        type=float,
+        default=None,
+        help="Target duration for smart VAD chunks in seconds (override config file)",
     )
 
     # VAD parameter overrides (whisper_vad is always used)
@@ -253,6 +266,22 @@ def select_best_compute_type(device: str) -> str:
     return default
 
 
+def _coerce_bool(value: Any, *, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "y", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "n", "off"}:
+            return False
+    raise ValueError(f"Expected boolean value, got {value!r}")
+
+
 @dataclass
 class Segment:
     start: int  # ms
@@ -261,10 +290,38 @@ class Segment:
 
 
 @dataclass(frozen=True)
+class SpeechSpan:
+    start: float
+    end: float
+
+    @property
+    def duration_s(self) -> float:
+        return max(0.0, self.end - self.start)
+
+
+@dataclass(frozen=True)
+class AudioChunk:
+    index: int
+    start: float
+    end: float
+
+    @property
+    def duration_s(self) -> float:
+        return max(0.0, self.end - self.start)
+
+
+@dataclass(frozen=True)
 class SegmentMergeOptions:
     enabled: bool = True
     max_gap_ms: int = 2_000
     max_duration_ms: int = 20_000
+
+
+@dataclass(frozen=True)
+class SmartSplitOptions:
+    enabled: bool = True
+    target_chunk_duration_s: float = MAX_SMART_CHUNK_DURATION_S
+    split_window_factor: float = 0.4
 
 
 def _normalize_merge_text(text: str) -> str:
@@ -290,6 +347,81 @@ def vad_segments_to_clip_timestamps(
         if end > start:
             clips.extend([start, end])
     return clips
+
+
+def vad_segments_to_speech_spans(
+    vad_segments: list[dict[str, Any]], sampling_rate: int = WHISPER_SAMPLING_RATE
+) -> list[SpeechSpan]:
+    spans: list[SpeechSpan] = []
+    for segment in vad_segments:
+        start = float(segment["start"]) / sampling_rate
+        end = float(segment["end"]) / sampling_rate
+        if end > start:
+            spans.append(SpeechSpan(start=start, end=end))
+    return spans
+
+
+def create_contiguous_chunks(
+    segments: list[SpeechSpan],
+    max_duration: float,
+    total_duration: float,
+    split_window_factor: float = 0.4,
+) -> list[AudioChunk]:
+    if max_duration <= 0:
+        raise ValueError("max_duration must be greater than 0")
+    if total_duration <= 0:
+        return []
+    if total_duration <= max_duration:
+        return [AudioChunk(0, 0.0, total_duration)]
+
+    chunks: list[AudioChunk] = []
+    current_start = 0.0
+    sorted_segments = sorted((span for span in segments if span.end > span.start), key=lambda span: span.start)
+
+    while current_start < total_duration:
+        potential_end = current_start + max_duration
+        if potential_end >= total_duration:
+            chunks.append(AudioChunk(len(chunks), current_start, total_duration))
+            break
+
+        decision_zone_start = current_start + (max_duration * (1 - split_window_factor))
+        best_split: float | None = None
+        best_gap_duration = 0.0
+
+        for previous, current in zip(sorted_segments, sorted_segments[1:], strict=False):
+            gap_start = previous.end
+            gap_end = current.start
+            if decision_zone_start <= gap_start and gap_end <= potential_end:
+                gap_duration = gap_end - gap_start
+                if gap_duration > 0.1 and gap_duration > best_gap_duration:
+                    best_gap_duration = gap_duration
+                    best_split = gap_start + (gap_duration / 2)
+
+        split_point = best_split if best_split is not None else potential_end
+        split_point = max(current_start, min(split_point, potential_end, total_duration))
+        chunks.append(AudioChunk(len(chunks), current_start, split_point))
+        current_start = split_point
+
+    return chunks
+
+
+def _max_segment_end(start: int, end: int, max_duration_ms: int | None) -> int:
+    if max_duration_ms is None or max_duration_ms <= 0:
+        return end
+    return min(end, start + max_duration_ms)
+
+
+def enforce_segment_timeline(segments: list[Segment], max_duration_ms: int | None = None) -> list[Segment]:
+    normalized: list[Segment] = []
+
+    for segment in sorted((s for s in segments if s.text.strip()), key=lambda s: (s.start, s.end)):
+        start = max(segment.start, normalized[-1].end if normalized else segment.start)
+        end = _max_segment_end(start, segment.end, max_duration_ms)
+        if end <= start:
+            continue
+        normalized.append(Segment(start=start, end=end, text=segment.text))
+
+    return normalized
 
 
 def merge_segments(segments: list[Segment], options: SegmentMergeOptions | None = None) -> list[Segment]:
@@ -467,7 +599,9 @@ class Inference:
             self.sub_formats.append(k)
 
         # Load generation config
-        self.generation_config, self.segment_merge_options = self._load_generation_config(args)
+        self.generation_config, self.segment_merge_options, self.smart_split_options = self._load_generation_config(
+            args
+        )
 
         # Setup VAD injection if requested
         self._setup_vad_injection(args)
@@ -479,8 +613,13 @@ class Inference:
             self.segment_merge_options.max_gap_ms,
             self.segment_merge_options.max_duration_ms,
         )
+        logger.info(
+            "Smart VAD split: enabled=%s, target_chunk_duration_s=%s",
+            self.smart_split_options.enabled,
+            self.smart_split_options.target_chunk_duration_s,
+        )
 
-    def _load_generation_config(self, args) -> tuple[dict[str, Any], SegmentMergeOptions]:
+    def _load_generation_config(self, args) -> tuple[dict[str, Any], SegmentMergeOptions, SmartSplitOptions]:
         """Load and process generation configuration"""
         # Default config
         config: dict[str, Any] = {
@@ -490,6 +629,7 @@ class Inference:
         }
 
         segment_merge_options = SegmentMergeOptions()
+        smart_split_options = SmartSplitOptions()
 
         # Load from file if exists
         if os.path.exists(args.generation_config):
@@ -504,6 +644,17 @@ class Inference:
                             file_segment_merge.get("max_duration_ms", segment_merge_options.max_duration_ms)
                         ),
                     )
+                file_smart_split = file_config.pop("smart_split_with_vad", None)
+                file_target_chunk_duration = file_config.pop("target_chunk_duration_s", None)
+                smart_split_options = SmartSplitOptions(
+                    enabled=_coerce_bool(file_smart_split, default=smart_split_options.enabled),
+                    target_chunk_duration_s=(
+                        float(file_target_chunk_duration)
+                        if file_target_chunk_duration is not None
+                        else smart_split_options.target_chunk_duration_s
+                    ),
+                    split_window_factor=smart_split_options.split_window_factor,
+                )
                 config = dict(**ChainMap(file_config, config))
 
         config["task"] = _normalize_whisper_task(args.task if args.task is not None else config.get("task"))
@@ -563,7 +714,29 @@ class Inference:
             ),
         )
 
-        return config, segment_merge_options
+        smart_split_options = SmartSplitOptions(
+            enabled=(
+                _coerce_bool(args.smart_split_with_vad, default=smart_split_options.enabled)
+                if args.smart_split_with_vad is not None
+                else smart_split_options.enabled
+            ),
+            target_chunk_duration_s=(
+                args.target_chunk_duration_s
+                if args.target_chunk_duration_s is not None
+                else smart_split_options.target_chunk_duration_s
+            ),
+            split_window_factor=smart_split_options.split_window_factor,
+        )
+        if smart_split_options.target_chunk_duration_s <= 0:
+            raise ValueError("target_chunk_duration_s must be greater than 0")
+        if smart_split_options.target_chunk_duration_s > MAX_SMART_CHUNK_DURATION_S:
+            smart_split_options = SmartSplitOptions(
+                enabled=smart_split_options.enabled,
+                target_chunk_duration_s=MAX_SMART_CHUNK_DURATION_S,
+                split_window_factor=smart_split_options.split_window_factor,
+            )
+
+        return config, segment_merge_options, smart_split_options
 
     def _vad_progress_callback(self, chunk_idx, total_chunks, device):
         """Progress callback for VAD processing."""
@@ -663,7 +836,7 @@ class Inference:
     def _prepare_transcription(self, audio_path: str, *, batched: bool) -> tuple[Any, dict[str, Any], float | None]:
         config = dict(self.generation_config)
 
-        if not config.get("vad_filter") or "clip_timestamps" in config:
+        if self.smart_split_options.enabled or not config.get("vad_filter") or "clip_timestamps" in config:
             return audio_path, config, None
 
         if self.vad_manager is None:
@@ -690,6 +863,95 @@ class Inference:
 
         return audio, config, duration_after_vad
 
+    def _plan_smart_chunks(self, audio_path: str) -> tuple[Any, list[AudioChunk], float | None]:
+        audio = decode_audio(audio_path, sampling_rate=WHISPER_SAMPLING_RATE)
+        duration = len(audio) / WHISPER_SAMPLING_RATE
+
+        if not self.smart_split_options.enabled or not self.generation_config.get("vad_filter"):
+            return audio, [AudioChunk(0, 0.0, duration)], None
+
+        if self.vad_manager is None:
+            return audio, [AudioChunk(0, 0.0, duration)], None
+
+        vad_parameters = self.generation_config.get("vad_parameters") or {}
+        vad_segments = self.vad_manager.get_speech_timestamps(
+            model_id="whisper_vad",
+            audio=audio,
+            sampling_rate=WHISPER_SAMPLING_RATE,
+            **vad_parameters,
+        )
+        duration_after_vad = sum(segment["end"] - segment["start"] for segment in vad_segments) / WHISPER_SAMPLING_RATE
+
+        spans = vad_segments_to_speech_spans(vad_segments, WHISPER_SAMPLING_RATE)
+        chunks = create_contiguous_chunks(
+            spans,
+            min(self.smart_split_options.target_chunk_duration_s, MAX_SMART_CHUNK_DURATION_S),
+            duration,
+            self.smart_split_options.split_window_factor,
+        )
+        if not chunks:
+            chunks = [AudioChunk(0, 0.0, duration)]
+        logger.info("Smart VAD split planned %s chunk(s)", len(chunks))
+
+        return audio, chunks, duration_after_vad
+
+    def _transcribe_standard(self, model, audio_input, transcription_config):
+        return model.transcribe(audio_input, **transcription_config)
+
+    def _transcribe_smart_chunks(self, model, task: InferenceTask) -> tuple[list[Segment], Any]:
+        audio, chunks, outer_duration_after_vad = self._plan_smart_chunks(task.audio_path)
+        duration = len(audio) / WHISPER_SAMPLING_RATE
+        config = dict(self.generation_config)
+        config.pop("clip_timestamps", None)
+        config["vad_filter"] = bool(config.get("vad_filter", True))
+        config.setdefault("beam_size", 1)
+        config.setdefault("condition_on_previous_text", False)
+
+        if outer_duration_after_vad == 0:
+            return [], SimpleNamespace(duration=duration, duration_after_vad=0)
+
+        segments: list[Segment] = []
+        inner_duration_after_vad = 0.0
+        has_inner_duration = False
+
+        for chunk in chunks:
+            start_sample = max(0, min(len(audio), int(round(chunk.start * WHISPER_SAMPLING_RATE))))
+            end_sample = max(start_sample, min(len(audio), int(round(chunk.end * WHISPER_SAMPLING_RATE))))
+            if end_sample <= start_sample:
+                continue
+            chunk_audio = audio[start_sample:end_sample]
+            logger.debug(
+                "Smart VAD chunk %s/%s: %s --> %s",
+                chunk.index + 1,
+                len(chunks),
+                SubWriter.srt_timestamp(int(round(chunk.start * 1_000))),
+                SubWriter.srt_timestamp(int(round(chunk.end * 1_000))),
+            )
+            chunk_segments_iter, chunk_info = model.transcribe(chunk_audio, **config)
+            if hasattr(chunk_info, "duration_after_vad"):
+                inner_duration_after_vad += float(chunk_info.duration_after_vad)
+                has_inner_duration = True
+            chunk_offset_ms = int(round(chunk.start * 1_000))
+            chunk_end_ms = int(round(chunk.end * 1_000))
+            for _segment in chunk_segments_iter:
+                segment = Segment(
+                    start=chunk_offset_ms + int(round(_segment.start * 1_000)),
+                    end=chunk_offset_ms + int(round(_segment.end * 1_000)),
+                    text=_segment.text.strip(),
+                )
+                if segment.start >= chunk_end_ms:
+                    continue
+                segment = Segment(segment.start, min(segment.end, chunk_end_ms), segment.text)
+                if segment.end > segment.start:
+                    segments.append(segment)
+                    logger.debug(
+                        f"[{SubWriter.lrc_timestamp(segment.start)} --> "
+                        f"{SubWriter.lrc_timestamp(segment.end)}] {segment.text}"
+                    )
+
+        duration_after_vad = inner_duration_after_vad if has_inner_duration else outer_duration_after_vad
+        return segments, SimpleNamespace(duration=duration, duration_after_vad=duration_after_vad)
+
     def _log_duration(self, duration: float, duration_after_vad: float) -> None:
         if duration == duration_after_vad or duration_after_vad == 0:
             logger.info(_("info.duration", duration=format_duration(duration)))
@@ -704,6 +966,9 @@ class Inference:
                 percent=format_percentage(rate),
             )
         )
+
+    def _should_use_smart_split(self) -> bool:
+        return bool(self.smart_split_options.enabled and self.generation_config.get("vad_filter", True))
 
     def generates(self, base_dirs):
         if len(base_dirs) == 0:
@@ -768,69 +1033,76 @@ class Inference:
                     )
                 )
 
-                audio_input, transcription_config, manual_duration_after_vad = self._prepare_transcription(
-                    task.audio_path,
-                    batched=bool(batched_model and batch_size_to_use > 0),
-                )
-
-                # Use batched or regular inference
-                if batched_model and batch_size_to_use > 0:
-                    # Use auto-retry with batch size reduction on OOM
-                    # This mimics HuggingFace Accelerate's find_executable_batch_size behavior
-                    try:
-                        _segments, info, actual_batch_size = self._transcribe_with_auto_batch_size(
-                            batched_model,
-                            audio_input,
-                            transcription_config,
-                            starting_batch_size=batch_size_to_use,
-                        )
-                        # Update batch_size_to_use if it was auto-adjusted
-                        if actual_batch_size < batch_size_to_use:
-                            logger.info(f"Batch size auto-adjusted from {batch_size_to_use} to {actual_batch_size}")
-                            batch_size_to_use = actual_batch_size
-                    except Exception as e:
-                        logger.warning(f"Batched inference failed: {str(e)}. Falling back to non-batched mode.")
-                        # Fallback to non-batched
-                        audio_input, transcription_config, manual_duration_after_vad = self._prepare_transcription(
-                            task.audio_path,
-                            batched=False,
-                        )
-                        _segments, info = model.transcribe(
-                            audio_input,
-                            **transcription_config,
-                        )
+                if self._should_use_smart_split():
+                    segments, info = self._transcribe_smart_chunks(model, task)
+                    duration_after_vad = info.duration_after_vad
                 else:
-                    if manual_duration_after_vad == 0:
-                        _segments = []
-                        info = SimpleNamespace(
-                            duration=len(audio_input) / WHISPER_SAMPLING_RATE,
-                            duration_after_vad=0,
-                        )
+                    audio_input, transcription_config, manual_duration_after_vad = self._prepare_transcription(
+                        task.audio_path,
+                        batched=bool(batched_model and batch_size_to_use > 0),
+                    )
+
+                    # Use batched or regular inference
+                    if batched_model and batch_size_to_use > 0:
+                        # Use auto-retry with batch size reduction on OOM
+                        # This mimics HuggingFace Accelerate's find_executable_batch_size behavior
+                        try:
+                            _segments, info, actual_batch_size = self._transcribe_with_auto_batch_size(
+                                batched_model,
+                                audio_input,
+                                transcription_config,
+                                starting_batch_size=batch_size_to_use,
+                            )
+                            # Update batch_size_to_use if it was auto-adjusted
+                            if actual_batch_size < batch_size_to_use:
+                                logger.info(f"Batch size auto-adjusted from {batch_size_to_use} to {actual_batch_size}")
+                                batch_size_to_use = actual_batch_size
+                        except Exception as e:
+                            logger.warning(f"Batched inference failed: {str(e)}. Falling back to non-batched mode.")
+                            # Fallback to non-batched
+                            audio_input, transcription_config, manual_duration_after_vad = self._prepare_transcription(
+                                task.audio_path,
+                                batched=False,
+                            )
+                            _segments, info = model.transcribe(
+                                audio_input,
+                                **transcription_config,
+                            )
                     else:
-                        _segments, info = model.transcribe(
-                            audio_input,
-                            **transcription_config,
+                        if manual_duration_after_vad == 0:
+                            _segments = []
+                            info = SimpleNamespace(
+                                duration=len(audio_input) / WHISPER_SAMPLING_RATE,
+                                duration_after_vad=0,
+                            )
+                        else:
+                            _segments, info = model.transcribe(
+                                audio_input,
+                                **transcription_config,
+                            )
+
+                    duration_after_vad = (
+                        manual_duration_after_vad if manual_duration_after_vad is not None else info.duration_after_vad
+                    )
+
+                    segments = []
+                    for _segment in _segments:
+                        segment = Segment(
+                            start=int(_segment.start * 1_000),
+                            end=int(_segment.end * 1_000),
+                            text=_segment.text.strip(),
+                        )
+                        segments.append(segment)
+                        logger.debug(
+                            f"[{SubWriter.lrc_timestamp(segment.start)} --> "
+                            f"{SubWriter.lrc_timestamp(segment.end)}] {segment.text}"
                         )
 
-                duration_after_vad = (
-                    manual_duration_after_vad if manual_duration_after_vad is not None else info.duration_after_vad
-                )
                 self._log_duration(info.duration, duration_after_vad)
 
-                segments = []
-                for _segment in _segments:
-                    segment = Segment(
-                        start=int(_segment.start * 1_000),
-                        end=int(_segment.end * 1_000),
-                        text=_segment.text.strip(),
-                    )
-                    segments.append(segment)
-                    logger.debug(
-                        f"[{SubWriter.lrc_timestamp(segment.start)} --> "
-                        f"{SubWriter.lrc_timestamp(segment.end)}] {segment.text}"
-                    )
-
+                segments = enforce_segment_timeline(segments, self.segment_merge_options.max_duration_ms)
                 segments = merge_segments(segments, self.segment_merge_options)
+                segments = enforce_segment_timeline(segments, self.segment_merge_options.max_duration_ms)
                 os.makedirs(os.path.dirname(task.sub_prefix), exist_ok=True)
                 for sub_suffix in task.sub_formats:
                     sub_path = f"{task.sub_prefix}.{sub_suffix}"
