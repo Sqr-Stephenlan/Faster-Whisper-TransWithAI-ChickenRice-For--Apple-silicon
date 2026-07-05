@@ -332,7 +332,7 @@ def vad_segments_to_clip_timestamps(
     vad_segments: list[dict[str, Any]], sampling_rate: int = WHISPER_SAMPLING_RATE, *, batched: bool = False
 ) -> list[float] | list[dict[str, float]]:
     if batched:
-        clips = []
+        clips: list[dict[str, float]] = []
         for segment in vad_segments:
             start = float(segment["start"]) / sampling_rate
             end = float(segment["end"]) / sampling_rate
@@ -340,13 +340,13 @@ def vad_segments_to_clip_timestamps(
                 clips.append({"start": start, "end": end})
         return clips
 
-    clips = []
+    timestamps: list[float] = []
     for segment in vad_segments:
         start = float(segment["start"]) / sampling_rate
         end = float(segment["end"]) / sampling_rate
         if end > start:
-            clips.extend([start, end])
-    return clips
+            timestamps.extend([start, end])
+    return timestamps
 
 
 def vad_segments_to_speech_spans(
