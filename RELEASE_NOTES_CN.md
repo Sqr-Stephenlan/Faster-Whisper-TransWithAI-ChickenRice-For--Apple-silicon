@@ -230,6 +230,11 @@ A: 使用"低显存模式"批处理文件，或切换到CPU模式。
 
 ## 📝 更新日志
 
+### v1.10 (2026-07-05)
+- 🔀 **智能 VAD 分段转录**：新增 `smart_split_with_vad` / `target_chunk_duration_s` 配置（`generation_config.json5` 或命令行覆盖）。开启后先用外部 VAD 在静音处选取安全连续分块（上限 30s），再在每个分块内运行 faster-whisper 内部 VAD，并在合并前后强制单调、时长受限的时间轴，缓解长音频时间戳漂移
+- 🔄 **日文转录模型更新**：日文原文转录模型由 [Jim6789/whisper-ja-1.5B-ct2](https://huggingface.co/Jim6789/whisper-ja-1.5B-ct2) 切换为 [TransWithAI/whisper-ja-1.5B-ct2](https://huggingface.co/TransWithAI/whisper-ja-1.5B-ct2)（[efwkjn/whisper-ja-1.5B](https://huggingface.co/efwkjn/whisper-ja-1.5B) 的 bf16 转换版本）
+- 🔧 **AMD ROCm 运行时更新**：RDNA1/2/3（`gfx101x`/`gfx103x`/`gfx110x`）Windows 构建切换至 AMD 官方 `rocm-rel-7.1.1` 轮子，并新增 CI 步骤将 `libhipblas.dll` 映射为 `hipblas.dll`，修复 CTranslate2 HIP 后端找不到 `hipblas.dll` 的问题；RDNA4（`gfx120x`）维持 `rocm-rel-7.2.1`
+
 ### v1.9 (2026-06-12)
 - 🎯 **转录时间轴稳定性修复**：改用外部 VAD（`VadModelManager`）预先计算语音区间，并以 `clip_timestamps` 显式传入 faster-whisper，替代其内部 `vad_filter`；在批处理与非批处理模式下都能避免 Whisper 时间戳坍缩/错乱，字幕时间轴更稳定
 
