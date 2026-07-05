@@ -67,8 +67,8 @@ jobs:
             env_name: "faster-whisper-rocm"
             artifact_suffix: "gfx101x_dgpu"
             ctranslate2_wheel_url: "https://github.com/TransWithAI/CTranslate2/releases/download/v4.7.2/ctranslate2-4.7.1-cp310-cp310-win_amd64.whl"
-            rocm_sdk_core_url: "https://d2awnip2yjpvqn.cloudfront.net/v2/gfx101X-dgpu/rocm_sdk_core-7.12.0a20260224-py3-none-win_amd64.whl"
-            rocm_sdk_libraries_url: "https://d2awnip2yjpvqn.cloudfront.net/v2/gfx101X-dgpu/rocm_sdk_libraries_gfx101x_dgpu-7.12.0a20260224-py3-none-win_amd64.whl"
+            rocm_sdk_core_url: "https://repo.radeon.com/rocm/windows/rocm-rel-7.1.1/rocm_sdk_core-0.1.dev0-py3-none-win_amd64.whl"
+            rocm_sdk_libraries_url: "https://repo.radeon.com/rocm/windows/rocm-rel-7.1.1/rocm_sdk_libraries_custom-0.1.dev0-py3-none-win_amd64.whl"
           - accel: "rocm"
             build_label: "AMD gfx103X-dgpu"
             cuda: "rocm"
@@ -77,8 +77,8 @@ jobs:
             env_name: "faster-whisper-rocm"
             artifact_suffix: "gfx103x_dgpu"
             ctranslate2_wheel_url: "https://github.com/TransWithAI/CTranslate2/releases/download/v4.7.2/ctranslate2-4.7.1-cp310-cp310-win_amd64.whl"
-            rocm_sdk_core_url: "https://d2awnip2yjpvqn.cloudfront.net/v2/gfx103X-dgpu/rocm_sdk_core-7.12.0a20260224-py3-none-win_amd64.whl"
-            rocm_sdk_libraries_url: "https://d2awnip2yjpvqn.cloudfront.net/v2/gfx103X-dgpu/rocm_sdk_libraries_gfx103x_dgpu-7.12.0a20260224-py3-none-win_amd64.whl"
+            rocm_sdk_core_url: "https://repo.radeon.com/rocm/windows/rocm-rel-7.1.1/rocm_sdk_core-0.1.dev0-py3-none-win_amd64.whl"
+            rocm_sdk_libraries_url: "https://repo.radeon.com/rocm/windows/rocm-rel-7.1.1/rocm_sdk_libraries_custom-0.1.dev0-py3-none-win_amd64.whl"
           - accel: "rocm"
             build_label: "AMD gfx110X-all"
             cuda: "rocm"
@@ -87,8 +87,8 @@ jobs:
             env_name: "faster-whisper-rocm"
             artifact_suffix: "gfx110x_all"
             ctranslate2_wheel_url: "https://github.com/TransWithAI/CTranslate2/releases/download/v4.7.2/ctranslate2-4.7.1-cp310-cp310-win_amd64.whl"
-            rocm_sdk_core_url: "https://d2awnip2yjpvqn.cloudfront.net/v2/gfx110X-all/rocm_sdk_core-7.12.0a20260224-py3-none-win_amd64.whl"
-            rocm_sdk_libraries_url: "https://d2awnip2yjpvqn.cloudfront.net/v2/gfx110X-all/rocm_sdk_libraries_gfx110x_all-7.12.0a20260224-py3-none-win_amd64.whl"
+            rocm_sdk_core_url: "https://repo.radeon.com/rocm/windows/rocm-rel-7.1.1/rocm_sdk_core-0.1.dev0-py3-none-win_amd64.whl"
+            rocm_sdk_libraries_url: "https://repo.radeon.com/rocm/windows/rocm-rel-7.1.1/rocm_sdk_libraries_custom-0.1.dev0-py3-none-win_amd64.whl"
           - accel: "rocm"
             build_label: "AMD gfx120X-all"
             cuda: "rocm"
@@ -97,8 +97,8 @@ jobs:
             env_name: "faster-whisper-rocm"
             artifact_suffix: "gfx120x_all"
             ctranslate2_wheel_url: "https://github.com/TransWithAI/CTranslate2/releases/download/v4.7.2/ctranslate2-4.7.1-cp310-cp310-win_amd64.whl"
-            rocm_sdk_core_url: "https://d2awnip2yjpvqn.cloudfront.net/v2/gfx120X-all/rocm_sdk_core-7.12.0a20260224-py3-none-win_amd64.whl"
-            rocm_sdk_libraries_url: "https://d2awnip2yjpvqn.cloudfront.net/v2/gfx120X-all/rocm_sdk_libraries_gfx120x_all-7.12.0a20260224-py3-none-win_amd64.whl"
+            rocm_sdk_core_url: "https://repo.radeon.com/rocm/windows/rocm-rel-7.2.1/rocm_sdk_core-7.2.1-py3-none-win_amd64.whl"
+            rocm_sdk_libraries_url: "https://repo.radeon.com/rocm/windows/rocm-rel-7.2.1/rocm_sdk_libraries_custom-7.2.1-py3-none-win_amd64.whl"
         model:
           - model_variant: "nomodel"
             artifact_model_suffix: "nomodel"
@@ -159,12 +159,66 @@ jobs:
         echo "Installing ROCm runtime wheels for ${{ matrix.build.rocm_family }}..."
         python -m pip install "${{ matrix.build.rocm_sdk_core_url }}" "${{ matrix.build.rocm_sdk_libraries_url }}"
 
+    - name: Map libhipblas.dll to hipblas.dll (ROCm 7.1.1 compat)
+      if: matrix.build.accel == 'rocm'
+      run: |
+        # The ROCm 7.1.1 libraries wheel (rocm_sdk_libraries_custom) ships
+        # libhipblas.dll with the Linux-style "lib" prefix, but CTranslate2's
+        # HIP backend dlopens "hipblas.dll" (Windows-style, no prefix). Copy
+        # libhipblas.dll -> hipblas.dll so the runtime import resolves.
+        # This is a no-op when libhipblas.dll is already absent (e.g. the
+        # 7.2.1 gfx120x wheel already uses Windows-style DLL naming).
+        LIBS_BIN=$(python - <<'PY'
+        import os, site, sys
+        conda_prefix = os.environ.get('CONDA_PREFIX', sys.prefix)
+        candidates = [os.path.join(conda_prefix, 'Lib', 'site-packages')]
+        try:
+            candidates.extend(site.getsitepackages())
+        except Exception:
+            pass
+        for p in candidates:
+            b = os.path.join(p, '_rocm_sdk_libraries_custom', 'bin')
+            if os.path.isdir(b):
+                print(b)
+                break
+        PY
+        )
+        if [ -z "$LIBS_BIN" ]; then
+          echo "WARNING: _rocm_sdk_libraries_custom/bin not found; skipping DLL mapping"
+          exit 0
+        fi
+        echo "ROCm libraries bin dir: $LIBS_BIN"
+        SRC="$LIBS_BIN/libhipblas.dll"
+        DST="$LIBS_BIN/hipblas.dll"
+        if [ -f "$SRC" ]; then
+          cp "$SRC" "$DST"
+          echo "Copied: libhipblas.dll -> hipblas.dll ($(wc -c < "$DST") bytes)"
+        else
+          echo "libhipblas.dll not found in $LIBS_BIN (already Windows-style); nothing to map"
+        fi
+
     - name: Install HIP-enabled CTranslate2 wheel (AMD)
       if: matrix.build.accel == 'rocm'
       run: |
         echo "Installing HIP-enabled ctranslate2 wheel from: ${{ matrix.build.ctranslate2_wheel_url }}"
         python -m pip install --force-reinstall "${{ matrix.build.ctranslate2_wheel_url }}"
         python -c "import importlib.metadata as md; print(f'CTranslate2 version: {md.version(\"ctranslate2\")}')"
+
+    - name: Smoke ROCm runtime and CTranslate2 imports (AMD)
+      if: matrix.build.accel == 'rocm'
+      run: |
+        python - <<'PY'
+        import importlib.metadata as md
+        import sys
+
+        print(f"Python: {sys.version}")
+        print("Using normal CTranslate2 import for ROCm SDK wheel layout")
+
+        import ctranslate2
+
+        print(f"CTranslate2 import OK: {md.version('ctranslate2')}")
+        print(f"CTranslate2 module: {ctranslate2.__file__}")
+        PY
 
     - name: Force reinstall ctranslate2 for CUDA 11.8
       if: matrix.build.accel == 'cuda' && matrix.build.cuda == '11.8'
