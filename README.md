@@ -26,6 +26,53 @@ High-performance audio/video transcription and translation tool - Japanese-to-Ch
 - ☁️ 感谢 [@Randomless](https://github.com/Randomless) 贡献 Modal 云端推理功能
 - 💪 **感谢某匿名群友的算力和技术支持**
 
+## 🍎 macOS Apple Silicon CPU 快速开始
+
+此路径面向 Apple Silicon Mac，从源码运行 CTranslate2 CPU 推理；不使用 Metal、MPS、CoreML 主模型加速或 Apple Neural Engine。Mac 启动器固定 `--device cpu --compute_type int8`，VAD 固定使用 ONNX Runtime `CPUExecutionProvider`。
+
+```bash
+# 1. 检查现有环境；若尚无 .venv，再由用户主动执行 ./dev.sh bootstrap
+./dev.sh doctor
+
+# 2. 首次联网下载翻译所需资产（体积较大，先确认磁盘空间）
+./dev.sh python download_models.py --profile translate --non-interactive
+
+# 3. 严格检查环境与翻译模型；缺失或损坏会返回非零退出码
+./dev.sh python scripts/macos_doctor.py --mode translate
+
+# 4. 启动翻译，也可在 Finder 双击“运行(翻译)(CPU).command”后多选文件
+./运行\(翻译\)\(CPU\).command "/Users/me/音频/第 1 集.m4a"
+```
+
+转录模式需另行下载并使用独立模型：
+
+```bash
+./dev.sh python download_models.py --profile transcribe --non-interactive
+./dev.sh python scripts/macos_doctor.py --mode transcribe
+./运行\(转录\)\(CPU\).command "/Users/me/音频/第 1 集.m4a"
+```
+
+模型固定布局如下；翻译模型和转录模型不能只靠更改 `--task` 相互替代：
+
+```text
+models/
+├── whisper_vad.onnx
+├── whisper_vad_metadata.json
+├── whisper-base/
+├── translate/       # 海南鸡日译中 CT2 模型
+└── transcribe/      # 日文转录 CT2 模型
+```
+
+首次安装和模型下载需要网络。上述资产完整后，推理会强制使用本地文件，可断网运行。模型不进入 Git；若模型不完整，程序会在创建字幕前失败，并提示运行 doctor。
+
+完全展开的命令行示例：
+
+```bash
+./dev.sh python infer.py --model_name_or_path "$PWD/models/translate" --task translate --device cpu --compute_type int8 --cpu_threads 0 --vad_threads 8 --audio_suffixes "mp3,wav,flac,m4a,aac,ogg,wma,mp4,mkv,avi,mov,webm,flv,wmv" --sub_formats "srt,vtt,lrc" "/Users/me/日语 音频（测试）/第 1 集.m4a"
+```
+
+运行日志写入仓库根目录的 `latest.log`。更多安装、离线和验收说明见 [使用说明](使用说明.txt) 中的“macOS Apple Silicon CPU”章节。
+
 ## ✨ 功能特性 / Features
 
 - 🎯 **高精度日文转中文翻译**: 基于5000小时音频数据训练的"海南鸡v2"日文转中文优化模型

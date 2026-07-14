@@ -9,6 +9,104 @@
 
 将需要转录/翻译的音频或视频文件（或包含它们的文件夹）拖放到相应的批处理文件上运行。
 
+=== macOS Apple Silicon CPU ===
+
+适用范围：Apple Silicon（arm64）Mac 源码运行。主模型使用 CTranslate2 CPU int8；不使用 Metal、MPS、CoreML 主模型加速或 Apple Neural Engine。VAD 仅使用 ONNX Runtime CPUExecutionProvider。
+
+1. 环境安装与检查
+
+在终端进入仓库目录后运行：
+
+  ./dev.sh doctor
+
+项目已有可用 .venv 时会直接使用，禁止删除或重建。若新机器没有 .venv，在确认要创建环境后运行：
+
+  ./dev.sh bootstrap
+
+运行依赖来自 requirements-macos.txt，并受 constraints-macos-arm64.txt 的已验证版本约束；测试和静态检查依赖在 requirements-dev.txt。Mac CPU 运行时不需要 Modal、PyInstaller、CUDA 或 ROCm。
+
+2. 模型准备
+
+下载前请检查可用磁盘空间。模型较大，不进入 Git。首次下载需要网络：
+
+  ./dev.sh python download_models.py --profile translate --non-interactive
+  ./dev.sh python download_models.py --profile transcribe --non-interactive
+
+也可一次准备全部资产：
+
+  ./dev.sh python download_models.py --profile all --non-interactive
+
+固定目录：
+
+  models/whisper_vad.onnx
+  models/whisper_vad_metadata.json
+  models/whisper-base/preprocessor_config.json
+  models/whisper-base/config.json
+  models/translate/       日译中模型
+  models/transcribe/      日文转录模型
+
+翻译和转录是不同的 CT2 模型。仅把 --task 从 translate 改成 transcribe 不会把翻译模型变成转录模型，必须同时选择对应模型目录。
+
+严格检查（可双击“检查Mac环境.command”）：
+
+  ./dev.sh python scripts/macos_doctor.py --mode all --json
+
+缺失、空文件、非法 JSON、ONNX 无法加载或 provider 错误都会返回非零退出码。只检查、不联网：
+
+  ./dev.sh python download_models.py --profile all --verify-only --non-interactive
+
+3. Finder 双击与终端运行
+
+双击“运行(翻译)(CPU).command”或“运行(转录)(CPU).command”，在原生选择器中多选文件。取消选择会正常退出，不启动模型。也可在终端传入单个文件、多个文件或文件夹；空格、中文和括号路径会保持为独立参数。
+
+  './运行(翻译)(CPU).command' '/Users/me/日语 音频（测试）/第 1 集.m4a'
+  './运行(转录)(CPU).command' '/Users/me/第 1 集.m4a' '/Users/me/第 2 集.m4a'
+
+完全展开的翻译命令：
+
+  ./dev.sh python infer.py --model_name_or_path "$PWD/models/translate" --task translate --device cpu --compute_type int8 --cpu_threads 0 --vad_threads 8 --audio_suffixes "mp3,wav,flac,m4a,aac,ogg,wma,mp4,mkv,avi,mov,webm,flv,wmv" --sub_formats "srt,vtt,lrc" "/Users/me/日语 音频（测试）/第 1 集.m4a"
+
+默认生成 SRT、VTT、LRC。已存在的全部目标字幕且未指定 --overwrite 时会跳过并返回 0。可用 --overwrite 重做，用 --output_dir 指定含空格或中文的输出目录。
+
+4. 离线与日志
+
+首次安装和下载需要网络。doctor 通过后，推理设置 HF_HUB_OFFLINE 和 TRANSFORMERS_OFFLINE，并仅加载本地 whisper-base、VAD 和主模型，可断网运行。模型缺失或损坏不会静默联网，也不会写空字幕冒充成功。
+
+详细日志位于仓库根目录 latest.log。报错时请收集：
+
+  - latest.log
+  - ./dev.sh python scripts/macos_doctor.py --mode all --json 的输出
+  - 实际命令（隐去私人路径）
+  - 退出码：运行时/模型错误为 1，无有效输入为 2，成功或全部跳过为 0
+
+5. 本地测试媒体约定（不得提交 Git）
+
+  testdata/local/japanese-short.*   10–30 秒功能样本
+  testdata/local/japanese-5min.*    性能样本
+
+自动化测试如需音频，应使用标准库 wave 在临时目录生成静音或正弦 WAV，不提交二进制 fixture。
+
+6. 最终验收清单
+
+  [ ] ./dev.sh doctor、pip check、pytest、Ruff、Mypy、compileall 全部通过
+  [ ] doctor 的 VAD provider 只有 CPUExecutionProvider
+  [ ] 翻译短样本生成非空中文 SRT/VTT/LRC
+  [ ] 转录短样本生成非空日文 SRT/VTT/LRC
+  [ ] 多文件、目录、中文/空格/括号路径和中文输出目录通过
+  [ ] 已存在字幕跳过、--overwrite 重做、纯静音日志语义通过
+  [ ] 完整模型在断网环境仍可推理
+  [ ] Finder 三个 command 可打开，取消无 traceback
+  [ ] 5 分钟样本完成 cpu_threads/vad_threads 基准并记录选定值
+
+没有主模型或真实日语样本时，只能标记“等待端到端资产”，不得宣称完整完成。
+
+macOS 常见错误：
+
+  - doctor 报 models/translate 或 models/transcribe 缺失：下载对应 profile，不能只改 --task。
+  - command 无法打开：在终端运行 chmod +x *.command 后重试，并查看 macOS 安全性提示。
+  - 没有字幕：先看 latest.log；若确为纯静音，允许生成空字幕，但日志应明确未检测到语音。
+  - 模型/运行时错误：doctor 必须先通过；不要手工放置残缺模型文件。
+
 === 选择运行模式 ===
 
 翻译模式:
