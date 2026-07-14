@@ -206,3 +206,6 @@ desktop.ini
 .codegraph/
 
 models/
+testdata/local/
+benchmarks/local/
+latest.log

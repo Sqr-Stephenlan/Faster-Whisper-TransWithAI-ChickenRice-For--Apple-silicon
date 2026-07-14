@@ -160,5 +160,27 @@ class DownloadFileMirrorTests(unittest.TestCase):
         self.assertEqual(len(session.calls), 1)
 
 
+class StrictDownloadTests(unittest.TestCase):
+    def test_hf_model_partial_download_returns_false(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as tmp_dir,
+            patch.object(download_models, "MODELS_ROOT", Path(tmp_dir)),
+            patch.object(download_models, "get_hf_api_files", return_value=["config.json", "model.bin"]),
+            patch.object(download_models, "download_file", side_effect=[True, False]),
+        ):
+            self.assertFalse(download_models.download_hf_model("owner/model", "translate"))
+
+    def test_verify_only_never_calls_network(self) -> None:
+        with (
+            patch("sys.argv", ["download_models.py", "--profile", "all", "--verify-only", "--non-interactive"]),
+            patch.object(download_models.requests, "get") as get,
+            patch.object(download_models.requests, "Session") as session,
+        ):
+            self.assertEqual(download_models.main(), 1)
+
+        get.assert_not_called()
+        session.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

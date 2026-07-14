@@ -16,6 +16,22 @@ from urllib.parse import urljoin
 
 import requests
 
+ROOT = Path(__file__).resolve().parent
+SRC = ROOT / "src"
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
+
+from faster_whisper_transwithai_chickenrice.runtime_assets import (
+    DEFAULT_MODELS_ROOT,
+    MODEL_DIRECTORIES,
+    PROFILE_REPOSITORIES,
+    format_report,
+    validate_ct2_model,
+    validate_feature_extractor,
+    validate_profile,
+    validate_vad_assets,
+)
+
 
 # Detect if the environment supports Unicode/emoji
 def can_use_unicode():
@@ -86,6 +102,7 @@ DOWNLOAD_MAX_RETRY_DELAY_SECONDS = 30.0
 
 HF_HOST = "https://huggingface.co/"
 HF_MIRROR_HOST = "https://hf-mirror.com/"
+MODELS_ROOT = DEFAULT_MODELS_ROOT
 
 
 def _mirror_url(url: str) -> str | None:
@@ -169,7 +186,13 @@ def _download_from_url(url: str, dest_path: Path, session: requests.Session) -> 
         return False
 
 
-def download_file(url: str, dest_path: Path, session: requests.Session | None = None) -> bool:
+def download_file(
+    url: str,
+    dest_path: Path,
+    session: requests.Session | None = None,
+    *,
+    force: bool = False,
+) -> bool:
     """Download a file with progress indicator.
 
     Tries the given URL first. If it is a huggingface.co URL and the download
@@ -182,10 +205,12 @@ def download_file(url: str, dest_path: Path, session: requests.Session | None = 
     # Create parent directory if needed
     dest_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Skip if file already exists
-    if dest_path.exists():
+    # Skip only complete-looking files. Empty files are always replaced.
+    if dest_path.exists() and dest_path.stat().st_size > 0 and not force:
         print(f"  {CHECKMARK} {dest_path.name} already exists")
         return True
+    if dest_path.exists():
+        dest_path.unlink()
 
     # Try the primary host first, then fall back to the hf-mirror.com mirror.
     candidate_urls = [url]
@@ -216,17 +241,17 @@ def get_hf_api_files(repo_id: str) -> list[str]:
         return []
 
 
-def download_hf_model(repo_id: str, target_dir: str | None = None):
+def download_hf_model(repo_id: str, target_dir: str | None = None, *, force: bool = False):
     """Download model files from any HuggingFace repository"""
     base_url = f"https://huggingface.co/{repo_id}/resolve/main/"
 
     # Determine target directory
     if target_dir:
-        models_dir = Path("models") / target_dir
+        models_dir = MODELS_ROOT / target_dir
     else:
         # Use repository name as default subdirectory
         repo_name = repo_id.split("/")[-1]
-        models_dir = Path("models") / repo_name
+        models_dir = MODELS_ROOT / repo_name
 
     print(f"\n{PACKAGE} Downloading model from {repo_id}")
     print(f"   Target directory: {models_dir}")
@@ -241,21 +266,8 @@ def download_hf_model(repo_id: str, target_dir: str | None = None):
         files_to_download = [f for f in api_files if any(f.endswith(ext) for ext in essential_extensions)]
         print(f"  Found {len(files_to_download)} files in repository")
     else:
-        # If API fails, try common file names
-        files_to_download = [
-            "config.json",
-            "model.bin",
-            "pytorch_model.bin",
-            "model.safetensors",
-            "preprocessor_config.json",
-            "tokenizer.json",
-            "tokenizer_config.json",
-            "vocabulary.json",
-            "vocab.json",
-            "special_tokens_map.json",
-            "merges.txt",
-        ]
-        print("  Using common file list (API unavailable)")
+        print(f"  {CROSS} Could not obtain the repository file manifest; refusing a partial download")
+        return False
 
     session = requests.Session()
     session.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
@@ -264,18 +276,18 @@ def download_hf_model(repo_id: str, target_dir: str | None = None):
     for filename in files_to_download:
         url = urljoin(base_url, filename)
         dest_path = models_dir / filename
-        if download_file(url, dest_path, session):
+        if download_file(url, dest_path, session, force=force):
             success_count += 1
 
     print(f"  {CHECKMARK} Downloaded {success_count}/{len(files_to_download)} files")
-    return success_count > 0
+    return bool(files_to_download) and success_count == len(files_to_download)
 
 
-def download_vad_model():
+def download_vad_model(*, force: bool = False):
     """Download VAD ONNX model files (always required)"""
     repo_id = "TransWithAI/Whisper-Vad-EncDec-ASMR-onnx"
     base_url = f"https://huggingface.co/{repo_id}/resolve/main/"
-    models_dir = Path("models")
+    models_dir = MODELS_ROOT
 
     print(f"\n{PACKAGE} Downloading VAD ONNX model from {repo_id}")
 
@@ -295,23 +307,23 @@ def download_vad_model():
     for source_name, dest_name in files:
         url = urljoin(base_url, source_name)
         dest_path = models_dir / dest_name
-        if download_file(url, dest_path, session):
+        if download_file(url, dest_path, session, force=force):
             success_count += 1
 
     print(f"  {CHECKMARK} Downloaded {success_count}/{len(files)} files")
     return success_count == len(files)
 
 
-def download_whisper_base_for_feature_extractor():
+def download_whisper_base_for_feature_extractor(*, force: bool = False):
     """Download whisper-base model files specifically for feature extractor (offline usage)"""
     repo_id = "openai/whisper-base"
-    models_dir = Path("models") / "whisper-base"
+    models_dir = MODELS_ROOT / "whisper-base"
     base_url = f"https://huggingface.co/{repo_id}/resolve/main/"
 
     print(f"\n{PACKAGE} Downloading whisper-base for feature extractor (offline usage)")
 
     # Check if files already exist from main models folder
-    existing_models_dir = Path("models")
+    existing_models_dir = MODELS_ROOT
     if existing_models_dir.exists():
         # Files we can copy from existing models folder if available
         files_to_copy = [
@@ -357,7 +369,7 @@ def download_whisper_base_for_feature_extractor():
     for filename in required_files:
         url = urljoin(base_url, filename)
         dest_path = models_dir / filename
-        if download_file(url, dest_path, session):
+        if download_file(url, dest_path, session, force=force):
             success_count += 1
 
     print(f"  {CHECKMARK} Downloaded {success_count}/{len(required_files)} feature extractor files")
@@ -365,101 +377,38 @@ def download_whisper_base_for_feature_extractor():
 
 
 def verify_whisper_base_feature_extractor():
-    """Verify that whisper-base feature extractor files exist"""
-    models_dir = Path("models") / "whisper-base"
-
-    required_files = [
-        ("preprocessor_config.json", "Feature extractor config"),
-        ("config.json", "Model configuration"),
-    ]
-
-    optional_files = [
-        ("tokenizer.json", "Tokenizer"),
-        ("vocab.json", "Vocabulary"),
-    ]
-
-    if not models_dir.exists():
-        return False
-
+    """Strictly verify local whisper-base feature extractor files."""
     print(f"\n{SEARCH} Verifying whisper-base feature extractor files...")
-    all_required_present = True
-
-    for filename, description in required_files:
-        filepath = models_dir / filename
-        if filepath.exists():
-            size_kb = filepath.stat().st_size / 1024
-            print(f"  {CHECKMARK} {filename} ({size_kb:.1f} KB)")
-        else:
-            print(f"  {CROSS} {filename} missing - {description}")
-            all_required_present = False
-
-    for filename, _description in optional_files:
-        filepath = models_dir / filename
-        if filepath.exists():
-            size_kb = filepath.stat().st_size / 1024
-            print(f"  {CHECKMARK} {filename} ({size_kb:.1f} KB) - optional")
-
-    return all_required_present
+    _checked, issues = validate_feature_extractor(MODELS_ROOT)
+    for issue in issues:
+        print(f"  {CROSS} {issue.path}: {issue.message}")
+    return not issues
 
 
 def verify_vad_model():
-    """Verify that required VAD model files exist"""
-    models_dir = Path("models")
-
-    required_files = [
-        ("whisper_vad.onnx", "VAD ONNX model"),
-        ("whisper_vad_metadata.json", "VAD metadata"),
-    ]
-
+    """Strictly verify VAD JSON and a CPU-only ONNX Runtime session."""
     print(f"\n{SEARCH} Verifying VAD model files...")
-    all_present = True
-
-    for filename, description in required_files:
-        filepath = models_dir / filename
-        if filepath.exists():
-            size_mb = filepath.stat().st_size / (1024 * 1024)
-            print(f"  {CHECKMARK} {filename} ({size_mb:.1f} MB)")
-        else:
-            print(f"  {CROSS} {filename} missing - {description}")
-            all_present = False
-
-    return all_present
+    _checked, issues, providers = validate_vad_assets(MODELS_ROOT)
+    for issue in issues:
+        print(f"  {CROSS} {issue.path}: {issue.message}")
+    if providers:
+        print(f"  {CHECKMARK} ONNX providers: {','.join(providers)}")
+    return not issues
 
 
 def verify_hf_model(repo_id: str, target_dir: str | None = None):
-    """Verify that HuggingFace model files exist"""
+    """Strictly verify a local CTranslate2 model directory."""
     if target_dir:
-        models_dir = Path("models") / target_dir
+        models_dir = MODELS_ROOT / target_dir
     else:
         repo_name = repo_id.split("/")[-1]
-        models_dir = Path("models") / repo_name
+        models_dir = MODELS_ROOT / repo_name
 
-    if not models_dir.exists():
-        print(f"\n{WARNING} Model directory {models_dir} does not exist")
-        return False
-
-    print(f"\n{SEARCH} Verifying model files in {models_dir}...")
-
-    # Check for common model files
-    common_files = ["config.json", "model.bin", "pytorch_model.bin", "model.safetensors", "model.onnx"]
-    found_files = []
-
-    for file in models_dir.iterdir():
-        if file.is_file():
-            size_mb = file.stat().st_size / (1024 * 1024)
-            print(f"  {CHECKMARK} {file.name} ({size_mb:.1f} MB)")
-            found_files.append(file.name)
-
-    # Check if at least one model file exists
-    has_model = any(f in found_files for f in common_files)
-
-    if not has_model and found_files:
-        print(f"  {WARNING} Warning: No common model files found, but other files exist")
-    elif not found_files:
-        print(f"  {CROSS} No files found in model directory")
-        return False
-
-    return True
+    print(f"\n{SEARCH} Verifying CTranslate2 model files in {models_dir}...")
+    _checked, issues = validate_ct2_model(models_dir)
+    for issue in issues:
+        print(f"  {CROSS} {issue.path}: {issue.message}")
+    return not issues
 
 
 def main():
@@ -505,6 +454,22 @@ Examples:
     parser.add_argument("--force", action="store_true", help="Force re-download even if models already exist")
 
     parser.add_argument(
+        "--profile",
+        choices=("vad", "translate", "transcribe", "all"),
+        help="Download or verify the fixed macOS model layout",
+    )
+    parser.add_argument(
+        "--verify-only",
+        action="store_true",
+        help="Validate local files without creating directories or making network requests",
+    )
+    parser.add_argument(
+        "--non-interactive",
+        action="store_true",
+        help="Never prompt; return a non-zero exit status on any failure",
+    )
+
+    parser.add_argument(
         "--skip-vad", action="store_true", help="Skip downloading VAD model (not recommended, for testing only)"
     )
 
@@ -520,8 +485,41 @@ Examples:
     print("Model Downloader for Faster Whisper Custom VAD")
     print("=" * 60)
 
-    models_dir = Path("models")
-    models_dir.mkdir(exist_ok=True)
+    if args.verify_only:
+        if args.profile:
+            report = validate_profile(args.profile)
+            print(format_report(report))
+            return 0 if report.ok else 1
+
+        results = []
+        if not args.skip_vad:
+            results.append(verify_vad_model())
+        if not args.skip_whisper_base:
+            results.append(verify_whisper_base_feature_extractor())
+        if args.hf_model:
+            results.append(verify_hf_model(args.hf_model, args.target_dir))
+        if not results:
+            parser.error("--verify-only requires --profile or at least one asset selection")
+        return 0 if all(results) else 1
+
+    MODELS_ROOT.mkdir(exist_ok=True)
+
+    if args.profile:
+        modes = ("translate", "transcribe") if args.profile == "all" else ((args.profile,) if args.profile != "vad" else ())
+        downloads_ok = download_vad_model(force=args.force)
+        downloads_ok = download_whisper_base_for_feature_extractor(force=args.force) and downloads_ok
+        for mode in modes:
+            downloads_ok = (
+                download_hf_model(
+                    PROFILE_REPOSITORIES[mode],
+                    MODEL_DIRECTORIES[mode],
+                    force=args.force,
+                )
+                and downloads_ok
+            )
+        report = validate_profile(args.profile)
+        print("\n" + format_report(report))
+        return 0 if downloads_ok and report.ok else 1
 
     # Check if VAD model already exists
     if not args.force and not args.skip_vad and verify_vad_model():
@@ -545,6 +543,9 @@ Examples:
     # If everything exists and no force flag, ask user
     all_exists = vad_exists and (not args.hf_model or hf_exists) and (args.skip_whisper_base or whisper_base_exists)
     if all_exists and not args.force:
+        if args.non_interactive:
+            print("Skipping download.")
+            return 0
         response = input("\nAll required models are present. Re-download? (y/N): ").strip().lower()
         if response != "y":
             print("Skipping download.")
@@ -554,23 +555,24 @@ Examples:
 
     # Always download VAD model (unless explicitly skipped)
     if not args.skip_vad:
-        if not download_vad_model():
-            print(f"{WARNING} Error: VAD model is required and could not be downloaded")
+        if not download_vad_model(force=args.force):
+            print(f"{ERROR} Error: VAD model is required and could not be downloaded")
+            return 1
     else:
         print(f"\n{WARNING} Skipping VAD model download (not recommended)")
 
     # Download whisper-base feature extractor (unless explicitly skipped)
     if not args.skip_whisper_base:
-        if not download_whisper_base_for_feature_extractor():
-            print(f"{WARNING} Warning: Whisper-base feature extractor could not be downloaded completely")
-            # Don't fail completely if feature extractor download has issues
+        if not download_whisper_base_for_feature_extractor(force=args.force):
+            print(f"{ERROR} Whisper-base feature extractor could not be downloaded completely")
+            return 1
     else:
         print(f"\n{WARNING} Skipping whisper-base download (not recommended for offline usage)")
 
     # Download HuggingFace model if specified
-    if args.hf_model and not download_hf_model(args.hf_model, args.target_dir):
-        print(f"{WARNING} Warning: Model {args.hf_model} could not be downloaded completely")
-        # Don't fail completely if HF model download has issues
+    if args.hf_model and not download_hf_model(args.hf_model, args.target_dir, force=args.force):
+        print(f"{ERROR} Model {args.hf_model} could not be downloaded completely")
+        return 1
 
     # Final verification
     print("\n" + "=" * 60)
@@ -588,14 +590,16 @@ Examples:
         if verify_whisper_base_feature_extractor():
             print(f"\n{SUCCESS} Whisper-base feature extractor downloaded successfully!")
         else:
-            print(f"\n{WARNING} Warning: Some whisper-base feature extractor files may be missing.")
+            print(f"\n{ERROR} Whisper-base feature extractor is incomplete.")
+            return 1
 
     # Verify HF model if specified
     if args.hf_model:
         if verify_hf_model(args.hf_model, args.target_dir):
             print(f"\n{SUCCESS} Model {args.hf_model} downloaded successfully!")
         else:
-            print(f"\n{WARNING} Warning: Some files from {args.hf_model} may be missing.")
+            print(f"\n{ERROR} Model {args.hf_model} is incomplete.")
+            return 1
 
     return 0
 
