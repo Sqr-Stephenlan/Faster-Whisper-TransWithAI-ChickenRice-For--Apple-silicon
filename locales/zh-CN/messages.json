@@ -36,6 +36,7 @@
     "writing": "正在写入：{path}",
     "vad_deactivated": "VAD注入已停用",
     "no_files_found": "未找到要处理的文件",
+    "no_speech_detected": "未在 {path} 中检测到语音；将写入空字幕文件",
     "logging_to_file": "日志文件：{path}",
     "program_version": "程序版本：{version}",
     "python_version": "Python版本：{version}",

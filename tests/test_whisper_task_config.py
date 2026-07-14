@@ -332,6 +332,32 @@ class SmartSplitTests(unittest.TestCase):
         self.assertEqual(info.duration, 5.0)
         self.assertEqual(info.duration_after_vad, 1.5)
 
+    def test_smart_chunk_silence_logs_and_skips_model(self) -> None:
+        inference = Inference.__new__(Inference)
+        inference.generation_config = {
+            "language": "ja",
+            "task": "translate",
+            "vad_filter": True,
+            "vad_parameters": {"threshold": 0.5},
+        }
+        inference.smart_split_options = infer_module.SmartSplitOptions(enabled=True, target_chunk_duration_s=30.0)
+        inference.vad_manager = mock.Mock()
+        inference.vad_manager.get_speech_timestamps.return_value = []
+        model = mock.Mock()
+        task = mock.Mock(audio_path="silence.wav")
+
+        with (
+            mock.patch.object(infer_module, "decode_audio", return_value=[0.0] * 32_000),
+            self.assertLogs(infer_module.logger, level="INFO") as logs,
+        ):
+            segments, info = inference._transcribe_smart_chunks(model, task)
+
+        self.assertEqual(segments, [])
+        self.assertEqual(info.duration, 2.0)
+        self.assertEqual(info.duration_after_vad, 0)
+        model.transcribe.assert_not_called()
+        self.assertTrue(any("No speech detected" in message for message in logs.output))
+
 
 if __name__ == "__main__":
     unittest.main()

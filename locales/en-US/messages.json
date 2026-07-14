@@ -36,6 +36,7 @@
     "writing": "Writing: {path}",
     "vad_deactivated": "VAD injection deactivated",
     "no_files_found": "No files found to process",
+    "no_speech_detected": "No speech detected in {path}; writing empty subtitle files",
     "logging_to_file": "Logging to file: {path}",
     "program_version": "Program version: {version}",
     "python_version": "Python version: {version}",

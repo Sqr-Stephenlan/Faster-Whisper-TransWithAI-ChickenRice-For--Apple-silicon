@@ -959,6 +959,7 @@ class Inference:
         config.setdefault("condition_on_previous_text", False)
 
         if outer_duration_after_vad == 0:
+            logger.info(_("info.no_speech_detected", path=task.audio_path))
             return [], SimpleNamespace(duration=duration, duration_after_vad=0)
 
         segments: list[Segment] = []
@@ -1119,6 +1120,7 @@ class Inference:
                             )
                     else:
                         if manual_duration_after_vad == 0:
+                            logger.info(_("info.no_speech_detected", path=task.audio_path))
                             _segments = []
                             info = SimpleNamespace(
                                 duration=len(audio_input) / WHISPER_SAMPLING_RATE,
