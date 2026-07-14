@@ -156,23 +156,11 @@ class ModernI18n:
 
     def _find_locales_dir(self) -> Path:
         """Find the locales directory."""
-        # Check if running from PyInstaller bundle
-        if getattr(sys, "frozen", False):
-            # Running from executable
-            # sys._MEIPASS is the temporary folder where PyInstaller extracts files
-            # (injected at runtime by PyInstaller; not present in type stubs).
-            base_path = Path(sys._MEIPASS)  # type: ignore[attr-defined]
-            possible_paths = [
-                base_path / "locales",
-                Path(sys.executable).parent / "locales",
-            ]
-        else:
-            # Running from source
-            possible_paths = [
-                Path(__file__).parent.parent.parent / "locales",
-                Path(__file__).parent / "locales",
-                Path.cwd() / "locales",
-            ]
+        possible_paths = [
+            Path(__file__).parent.parent.parent / "locales",
+            Path(__file__).parent / "locales",
+            Path.cwd() / "locales",
+        ]
 
         for path in possible_paths:
             if path.exists() and path.is_dir():
@@ -197,24 +185,6 @@ class ModernI18n:
                 return self._normalize_locale(system_locale)
         except Exception:
             pass
-
-        # Windows-specific
-        if sys.platform == "win32":
-            try:
-                import ctypes
-
-                lang_id = ctypes.windll.kernel32.GetUserDefaultUILanguage()
-                locale_map = {
-                    0x0804: "zh-CN",
-                    0x0404: "zh-TW",
-                    0x0409: "en-US",
-                    0x0411: "ja-JP",
-                    0x0412: "ko-KR",
-                }
-                if lang_id in locale_map:
-                    return locale_map[lang_id]
-            except Exception:
-                pass
 
         return self.default_locale
 

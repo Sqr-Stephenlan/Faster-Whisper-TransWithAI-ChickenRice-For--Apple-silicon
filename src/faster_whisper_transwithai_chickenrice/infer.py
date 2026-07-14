@@ -20,8 +20,8 @@ from typing import Any
 
 import pyjson5
 
-# Import GPU/runtime-heavy deps defensively so `infer --help` still works on
-# machines that don't have the required GPU runtime DLLs installed.
+# Import accelerator/runtime-heavy dependencies defensively so `infer --help`
+# still works when optional runtime libraries are unavailable.
 _FASTER_WHISPER_IMPORT_ERROR = None
 _CTRANSLATE2_IMPORT_ERROR = None
 
@@ -221,11 +221,9 @@ def parse_arguments():
 
 
 def resolve_device(requested_device: str) -> str:
-    """Resolve aliases and auto detection to the CTranslate2 device name."""
+    """Resolve auto detection to the CTranslate2 device name."""
     ct2 = _require_ctranslate2()
     requested = (requested_device or "auto").strip().lower()
-    if requested in {"amd", "rocm", "hip"}:
-        return "cuda"
     if requested != "auto":
         return requested
 
@@ -1397,10 +1395,6 @@ def diagnose_environment():
     print(f"   Architecture: {platform.machine()}")
     print(f"   Python: {sys.version}")
     print(f"   Executable: {sys.executable}")
-    print(f"   Frozen: {getattr(sys, 'frozen', False)}")
-
-    if getattr(sys, "frozen", False):
-        print(f"   Bundle Dir: {getattr(sys, '_MEIPASS', 'Unknown')}")
 
     # CUDA environment
     print("\n2. CUDA Environment Variables:")
@@ -1476,40 +1470,13 @@ def check_onnxruntime_detailed():
             print("    2. CUDA libraries are missing or not in PATH")
             print("    3. Incompatible CUDA/cuDNN versions")
 
-        # Check bundled libraries if frozen
-        if getattr(sys, "frozen", False):
-            bundle_dir = getattr(sys, "_MEIPASS", "")
-            print(f"\n  Checking bundled libraries in: {bundle_dir}")
-
-            cuda_libs = []
-            onnx_libs = []
-
-            try:
-                for _root, _dirs, files in os.walk(bundle_dir):
-                    for file in files:
-                        if any(x in file.lower() for x in ["cuda", "cudnn", "cublas", "cufft"]):
-                            cuda_libs.append(file)
-                        elif "onnx" in file.lower():
-                            onnx_libs.append(file)
-
-                if cuda_libs:
-                    print(f"\n  Found {len(cuda_libs)} CUDA-related libraries:")
-                    for lib in cuda_libs[:10]:
-                        print(f"    - {lib}")
-                    if len(cuda_libs) > 10:
-                        print(f"    ... and {len(cuda_libs) - 10} more")
-                else:
-                    print("\n  ⚠️ No CUDA libraries found in bundle")
-            except Exception as e:
-                print(f"  Error scanning bundle: {e}")
-
         return True
 
     except ImportError as e:
         print(f"\n✗ Failed to import onnxruntime: {e}")
         print("\nSuggestions:")
         print("  1. Install onnxruntime-gpu for GPU support")
-        print("  2. Check if package is bundled correctly in PyInstaller")
+        print("  2. Check that the active environment contains compatible runtime libraries")
         return False
     except Exception as e:
         print(f"\n✗ Error during ONNX Runtime check: {e}")
@@ -1532,18 +1499,7 @@ def test_vad_initialization():
         model_paths = [
             "models/whisper_vad.onnx",
             "models/vad/whisper_vad.onnx",
-            os.path.join(os.path.dirname(sys.executable), "models", "whisper_vad.onnx"),
         ]
-
-        # If frozen, also check in bundle directory
-        if getattr(sys, "frozen", False):
-            bundle_dir = getattr(sys, "_MEIPASS", "")
-            model_paths.extend(
-                [
-                    os.path.join(bundle_dir, "models", "whisper_vad.onnx"),
-                    os.path.join(bundle_dir, "whisper_vad.onnx"),
-                ]
-            )
 
         model_path = None
         print("\nSearching for VAD model:")
@@ -1598,7 +1554,6 @@ def launch_debug_console():
     print("\nUseful variables:")
     print("  sys.path         - Python module search paths")
     print("  os.environ       - Environment variables")
-    print("  sys.frozen       - Check if running from PyInstaller")
     print("=" * 60 + "\n")
 
     # Create namespace with useful functions
@@ -1617,15 +1572,9 @@ def launch_debug_console():
 
 def main():
     """Main entry point for the script"""
-    if getattr(sys, "frozen", False):
-        os.chdir(os.path.dirname(sys.executable))
-    else:
-        # When run as a module, don't change directory
-        pass
-
     args = parse_arguments()
 
-    # fix windows gbk pipe issue
+    # Keep redirected logs and terminal output consistently UTF-8 encoded.
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
     if hasattr(sys.stderr, "reconfigure"):

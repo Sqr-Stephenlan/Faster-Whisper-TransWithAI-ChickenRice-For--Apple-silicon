@@ -1,0 +1,23 @@
+# Linux CUDA runtime used inside Modal containers.
+# Local macOS execution uses requirements-macos.txt instead.
+name: faster-whisper-modal-gpu
+channels:
+  - conda-forge
+  - defaults
+
+dependencies:
+  - python=3.10
+  - ffmpeg>=8.0
+  - cuda-runtime=12.8.*
+  - cudnn=9.10.*
+  - pip
+  - pip:
+      - ctranslate2>=4.5.0
+      - faster-whisper>=1.0.0
+      - librosa>=0.10.0
+      - numpy>=1.26.0
+      - onnxruntime-gpu>=1.20.0
+      - transformers>=4.30.0
+      - pyjson5>=1.6.0
+      - markupsafe==2.1.5
+      - requests>=2.28.0

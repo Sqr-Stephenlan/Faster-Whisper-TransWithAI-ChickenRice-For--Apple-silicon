@@ -136,9 +136,7 @@ class CpuRuntimePolicyTests(unittest.TestCase):
         with mock.patch.object(infer_module, "_require_faster_whisper", return_value=(model_class, mock.Mock())):
             inference._create_whisper_model()
 
-        model_class.assert_called_once_with(
-            "/models/translate", device="cpu", compute_type="int8", cpu_threads=12
-        )
+        model_class.assert_called_once_with("/models/translate", device="cpu", compute_type="int8", cpu_threads=12)
 
     def test_missing_main_model_fails_before_writing_subtitles(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -187,7 +185,11 @@ class VadRuntimePolicyTests(unittest.TestCase):
         fake_ort = types.SimpleNamespace(
             SessionOptions=FakeSessionOptions,
             InferenceSession=FakeSession,
-            get_available_providers=lambda: ["CoreMLExecutionProvider", "CUDAExecutionProvider", "CPUExecutionProvider"],
+            get_available_providers=lambda: [
+                "CoreMLExecutionProvider",
+                "CUDAExecutionProvider",
+                "CPUExecutionProvider",
+            ],
         )
         extractor = mock.Mock()
         fake_transformers = types.SimpleNamespace(
@@ -203,9 +205,7 @@ class VadRuntimePolicyTests(unittest.TestCase):
             (root / "whisper-base").mkdir()
             (root / "whisper-base" / "preprocessor_config.json").write_text("{}", encoding="utf-8")
             with mock.patch.dict(sys.modules, {"onnxruntime": fake_ort, "transformers": fake_transformers}):
-                wrapper = WhisperVADOnnxWrapper(
-                    str(model_path), str(metadata_path), force_cpu=True, num_threads=4
-                )
+                wrapper = WhisperVADOnnxWrapper(str(model_path), str(metadata_path), force_cpu=True, num_threads=4)
 
         self.assertEqual(wrapper.session.get_providers(), ["CPUExecutionProvider"])
         self.assertEqual(wrapper.session.sess_options.inter_op_num_threads, 1)

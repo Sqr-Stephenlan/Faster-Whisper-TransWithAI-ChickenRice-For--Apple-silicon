@@ -10,6 +10,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path, PurePosixPath
+from typing import Any
 from uuid import uuid4
 
 
@@ -36,12 +37,16 @@ def ensure_utf8_stdio() -> None:
 
 ensure_utf8_stdio()
 
+questionary: Any = None
+Choice: Any = None
 try:
-    import questionary
-    from questionary import Choice
+    import questionary as questionary_runtime
+    from questionary import Choice as ChoiceRuntime
 except ImportError:  # pragma: no cover
-    questionary = None
-    Choice = None
+    pass
+else:
+    questionary = questionary_runtime
+    Choice = ChoiceRuntime
 
 try:
     import modal
@@ -89,8 +94,7 @@ DEFAULT_GPU_CHOICES = [
 
 
 def resolve_resource_path(filename: str) -> Path:
-    base_dir = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
-    return base_dir / filename
+    return Path(__file__).resolve().parent / filename
 
 
 @dataclass
@@ -417,7 +421,7 @@ def build_modal_image() -> modal.Image:
         modal.Image.micromamba(python_version="3.10")
         .apt_install("git")
         .micromamba_install(
-            spec_file=str(resolve_resource_path("environment-cuda128.yml")),
+            spec_file=str(resolve_resource_path("environment-modal-gpu.yml")),
             channels=["conda-forge", "defaults"],
         )
         .pip_install("modal", "questionary")

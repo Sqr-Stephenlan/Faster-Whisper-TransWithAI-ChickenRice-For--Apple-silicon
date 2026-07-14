@@ -38,26 +38,18 @@ def can_use_unicode():
     """Check if the current environment supports Unicode output"""
     # If we're in a CI environment, be conservative and use ASCII
     if os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"):
-        # CI environments often have encoding issues, especially on Windows
+        # Captured CI logs may not advertise their actual output encoding.
         return False
 
     # Check if UTF-8 is explicitly set
     if os.environ.get("PYTHONIOENCODING", "").lower().startswith("utf"):
         return True
 
-    if sys.platform == "win32":
-        # Windows console often doesn't support Unicode well
-        # Try to enable UTF-8 on Windows
-        try:
-            # Test if we can encode an emoji
-            test_emoji = "✓"
-            test_emoji.encode(sys.stdout.encoding or "utf-8")
-            return True
-        except (UnicodeEncodeError, LookupError):
-            return False
-
-    # On other platforms (Linux, Mac), usually Unicode works
-    return True
+    try:
+        "✓".encode(sys.stdout.encoding or "utf-8")
+        return True
+    except (UnicodeEncodeError, LookupError):
+        return False
 
 
 # Define symbols based on Unicode support
@@ -83,18 +75,6 @@ else:
     SUCCESS = "[SUCCESS]"
     ERROR = "[ERROR]"
     WARNING = "[WARNING]"
-
-# Force UTF-8 encoding on stdout/stderr if possible
-if sys.platform == "win32" and not USE_UNICODE:
-    # On Windows CI, try to set UTF-8 mode
-    try:
-        import io
-
-        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
-        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
-    except Exception:
-        pass  # If this fails, we'll use ASCII symbols anyway
-
 
 DOWNLOAD_MAX_RETRIES = 5
 DOWNLOAD_RETRY_BACKOFF_SECONDS = 1.0
@@ -270,7 +250,7 @@ def download_hf_model(repo_id: str, target_dir: str | None = None, *, force: boo
         return False
 
     session = requests.Session()
-    session.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
+    session.headers.update({"User-Agent": "Faster-Whisper-TransWithAI-macOS/1.0"})
 
     success_count = 0
     for filename in files_to_download:
@@ -301,7 +281,7 @@ def download_vad_model(*, force: bool = False):
     ]
 
     session = requests.Session()
-    session.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
+    session.headers.update({"User-Agent": "Faster-Whisper-TransWithAI-macOS/1.0"})
 
     success_count = 0
     for source_name, dest_name in files:
@@ -363,7 +343,7 @@ def download_whisper_base_for_feature_extractor(*, force: bool = False):
     print(f"  Downloading feature extractor files from {repo_id}...")
 
     session = requests.Session()
-    session.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
+    session.headers.update({"User-Agent": "Faster-Whisper-TransWithAI-macOS/1.0"})
 
     success_count = 0
     for filename in required_files:
@@ -431,7 +411,7 @@ Examples:
     # Download VAD, whisper-base, and TransWithAI Japanese transcribe bf16 model
 
   %(prog)s --hf-model TransWithAI/whisper-ja-1.5B-ct2 --target-dir .
-    # Download the main model directly into models/ for the default .bat launchers
+    # Download the main model directly into models/ for source launchers.
 
   %(prog)s --hf-model openai/whisper-large-v3 --target-dir whisper-v3
     # Download VAD, whisper-base, and Whisper v3 to specific directory
@@ -505,7 +485,9 @@ Examples:
     MODELS_ROOT.mkdir(exist_ok=True)
 
     if args.profile:
-        modes = ("translate", "transcribe") if args.profile == "all" else ((args.profile,) if args.profile != "vad" else ())
+        modes = (
+            ("translate", "transcribe") if args.profile == "all" else ((args.profile,) if args.profile != "vad" else ())
+        )
         downloads_ok = download_vad_model(force=args.force)
         downloads_ok = download_whisper_base_for_feature_extractor(force=args.force) and downloads_ok
         for mode in modes:

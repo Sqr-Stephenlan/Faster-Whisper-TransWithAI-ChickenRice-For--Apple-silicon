@@ -82,7 +82,9 @@ def validate_ct2_model(model_dir: Path) -> tuple[list[str], list[AssetIssue]]:
     return checked, issues
 
 
-def validate_vad_assets(models_root: Path, *, create_session: bool = True) -> tuple[list[str], list[AssetIssue], list[str]]:
+def validate_vad_assets(
+    models_root: Path, *, create_session: bool = True
+) -> tuple[list[str], list[AssetIssue], list[str]]:
     model_path = models_root / "whisper_vad.onnx"
     metadata_path = models_root / "whisper_vad_metadata.json"
     checked = [str(model_path), str(metadata_path)]
