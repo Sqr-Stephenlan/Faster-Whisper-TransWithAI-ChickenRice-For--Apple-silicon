@@ -202,4 +202,7 @@ desktop.ini
 # Claude Code
 .claude/
 
+# CodeGraph local index
+.codegraph/
+
 models/
