@@ -105,19 +105,17 @@ class WhisperVADOnnxWrapper:
                 "total_duration_ms": 30000,
             }
 
-        # Initialize feature extractor - try local folder first for offline usage
-        local_whisper_base_path = Path("models/whisper-base")
-        if local_whisper_base_path.exists() and (local_whisper_base_path / "preprocessor_config.json").exists():
-            # Load from local folder for offline usage
-            try:
-                self.feature_extractor = WhisperFeatureExtractor.from_pretrained(str(local_whisper_base_path))
-                logger.info(_("vad.feature_extractor_loaded", path=local_whisper_base_path))
-            except Exception as e:
-                warnings.warn(f"Failed to load from local folder, trying online: {e}")
-                self.feature_extractor = WhisperFeatureExtractor.from_pretrained(self.metadata["whisper_model_name"])
-        else:
-            # Try to load from HuggingFace (requires internet)
-            self.feature_extractor = WhisperFeatureExtractor.from_pretrained(self.metadata["whisper_model_name"])
+        # Resolve the feature extractor beside the VAD assets and never fall back online.
+        local_whisper_base_path = Path(model_path).resolve().parent / "whisper-base"
+        if not (local_whisper_base_path / "preprocessor_config.json").is_file():
+            raise FileNotFoundError(
+                f"Local Whisper feature extractor is missing at {local_whisper_base_path}. "
+                "Run './dev.sh python scripts/macos_doctor.py --mode vad'."
+            )
+        self.feature_extractor = WhisperFeatureExtractor.from_pretrained(
+            str(local_whisper_base_path), local_files_only=True
+        )
+        logger.info(_("vad.feature_extractor_loaded", path=local_whisper_base_path))
 
         # Set up ONNX Runtime session
         opts = ort.SessionOptions()
@@ -134,19 +132,9 @@ class WhisperVADOnnxWrapper:
             opts.intra_op_num_threads = num_threads
         else:
             self.device = "CPU"
-            # For CPU, use half of available processors if num_threads is default (1)
-            import multiprocessing
-
-            if num_threads == 1:
-                # Use half of CPU count for optimal performance
-                optimal_threads = max(1, multiprocessing.cpu_count() // 2)
-                opts.inter_op_num_threads = optimal_threads
-                opts.intra_op_num_threads = optimal_threads
-                logger.info(_("vad.auto_configured", threads=optimal_threads, total=multiprocessing.cpu_count()))
-            else:
-                # Use user-specified thread count
-                opts.inter_op_num_threads = num_threads
-                opts.intra_op_num_threads = num_threads
+            # Keep a single inter-op pool and tune only intra-op parallelism.
+            opts.inter_op_num_threads = 1
+            opts.intra_op_num_threads = max(0, num_threads)
 
         self.session = ort.InferenceSession(model_path, providers=providers, sess_options=opts)
 
@@ -394,7 +382,7 @@ def get_speech_timestamps_onnx(
                 current_speech["end"] = current_speech["start"] + max_speech_frames
                 # Calculate probability statistics for segment
                 if current_probs:
-                    current_speech["probability"] = np.mean(current_probs)
+                    current_speech["probability"] = float(np.mean(current_probs))
                 speeches.append(current_speech)
                 current_speech = {}
                 current_probs = []
@@ -416,8 +404,8 @@ def get_speech_timestamps_onnx(
                 if current_speech["end"] - current_speech["start"] >= min_speech_frames:
                     # Calculate probability statistics for segment
                     if current_probs:
-                        current_speech["probability"] = np.mean(
-                            current_probs[: temp_end - int(current_speech["start"])]
+                        current_speech["probability"] = float(
+                            np.mean(current_probs[: temp_end - int(current_speech["start"])])
                         )
                     speeches.append(current_speech)
 
@@ -436,7 +424,7 @@ def get_speech_timestamps_onnx(
         if current_speech["end"] - current_speech["start"] >= min_speech_frames:
             # Calculate probability statistics for segment
             if current_probs:
-                current_speech["probability"] = np.mean(current_probs)
+                current_speech["probability"] = float(np.mean(current_probs))
             speeches.append(current_speech)
 
     # Apply padding to segments
@@ -479,23 +467,27 @@ class WhisperVadModel:
         self.wrapper = None
         self.progress_callback = progress_callback
 
-        # Initialize ONNX model if path provided
-        if self.config.onnx_model_path and os.path.exists(self.config.onnx_model_path):
-            try:
-                self.wrapper = WhisperVADOnnxWrapper(
-                    model_path=self.config.onnx_model_path,
-                    metadata_path=self.config.onnx_metadata_path,
-                    force_cpu=self.config.force_cpu,
-                    num_threads=self.config.num_threads,
-                    progress_callback=progress_callback,
-                )
-                logger.info(_("vad.model_initialized", path=self.config.onnx_model_path))
-                if self.wrapper.device:
-                    logger.info(_("vad.using_device", device=self.wrapper.device))
-            except Exception as e:
-                logger.error(_("vad.init_failed", error=e))
-        else:
-            logger.warning(_("vad.path_invalid", path=self.config.onnx_model_path))
+        if not self.config.onnx_model_path or not os.path.exists(self.config.onnx_model_path):
+            raise FileNotFoundError(
+                f"VAD model is missing at {self.config.onnx_model_path}. "
+                "Run './dev.sh python scripts/macos_doctor.py --mode vad'."
+            )
+        try:
+            self.wrapper = WhisperVADOnnxWrapper(
+                model_path=self.config.onnx_model_path,
+                metadata_path=self.config.onnx_metadata_path,
+                force_cpu=self.config.force_cpu,
+                num_threads=self.config.num_threads,
+                progress_callback=progress_callback,
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                f"Failed to initialize VAD from {self.config.onnx_model_path}: {exc}. "
+                "Run './dev.sh python scripts/macos_doctor.py --mode vad'."
+            ) from exc
+        logger.info(_("vad.model_initialized", path=self.config.onnx_model_path))
+        if self.wrapper.device:
+            logger.info(_("vad.using_device", device=self.wrapper.device))
 
     def get_speech_timestamps(
         self,
@@ -513,8 +505,7 @@ class WhisperVadModel:
         Get speech timestamps using Whisper VAD.
         """
         if self.wrapper is None:
-            logger.error(_("vad.not_initialized"))
-            return []
+            raise RuntimeError("VAD is not initialized; inference cannot continue")
 
         # Use provided parameters or defaults from config
         threshold = threshold if threshold is not None else self.config.threshold

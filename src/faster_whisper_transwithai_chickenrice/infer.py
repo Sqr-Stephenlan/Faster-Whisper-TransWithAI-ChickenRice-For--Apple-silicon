@@ -44,6 +44,12 @@ except Exception as e:
 # Import modern i18n module for translations
 from . import i18n_modern as i18n
 from . import inject_vad, uninject_vad
+from .runtime_assets import (
+    DEFAULT_MODELS_ROOT,
+    validate_ct2_model,
+    validate_feature_extractor,
+    validate_vad_assets,
+)
 from .vad_manager import VadConfig, VadModelManager
 
 # Convenience imports
@@ -54,6 +60,9 @@ format_percentage = i18n.format_percentage
 WHISPER_TASKS = ("transcribe", "translate")
 WHISPER_SAMPLING_RATE = 16_000
 MAX_SMART_CHUNK_DURATION_S = 30.0
+EXIT_OK = 0
+EXIT_RUNTIME_ERROR = 1
+EXIT_NO_INPUT = 2
 
 
 def _normalize_whisper_task(task: Any) -> str:
@@ -89,6 +98,18 @@ def parse_arguments():
     parser.add_argument("--model_name_or_path", type=str, default="models", help=_("args.model_path"))
     parser.add_argument("--device", type=str, default="auto", help=_("args.device"))
     parser.add_argument("--compute_type", type=str, default="auto", help=_("args.compute_type"))
+    parser.add_argument(
+        "--cpu_threads",
+        type=int,
+        default=0,
+        help="CTranslate2 CPU worker threads; 0 lets CTranslate2 choose",
+    )
+    parser.add_argument(
+        "--vad_threads",
+        type=int,
+        default=8,
+        help="ONNX Runtime VAD intra-op threads; 0 lets ONNX Runtime choose",
+    )
     parser.add_argument("--overwrite", action="store_true", default=False, help=_("args.overwrite"))
     parser.add_argument(
         "--audio_suffixes",
@@ -199,6 +220,24 @@ def parse_arguments():
     return parser.parse_args()
 
 
+def resolve_device(requested_device: str) -> str:
+    """Resolve aliases and auto detection to the CTranslate2 device name."""
+    ct2 = _require_ctranslate2()
+    requested = (requested_device or "auto").strip().lower()
+    if requested in {"amd", "rocm", "hip"}:
+        return "cuda"
+    if requested != "auto":
+        return requested
+
+    cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if cuda_visible in {"", "-1"}:
+        return "cpu"
+    try:
+        return "cuda" if ct2.get_cuda_device_count() > 0 else "cpu"
+    except Exception:
+        return "cpu"
+
+
 def select_best_compute_type(device: str) -> str:
     """
     Automatically select the best compute type based on device and available types.
@@ -215,22 +254,8 @@ def select_best_compute_type(device: str) -> str:
     """
     ct2 = _require_ctranslate2()
 
-    # Normalize and accept friendly aliases.
-    device = (device or "auto").strip().lower()
-    if device in {"amd", "rocm", "hip"}:
-        device = "cuda"  # HIP builds still use the public device name "cuda".
-
-    # Determine the actual device if 'auto' is specified.
-    actual_device = device
-    if device == "auto":
-        cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES", None)
-        if cuda_visible in {"", "-1"}:
-            actual_device = "cpu"
-        else:
-            try:
-                actual_device = "cuda" if ct2.get_cuda_device_count() > 0 else "cpu"
-            except Exception:
-                actual_device = "cpu"
+    actual_device = resolve_device(device)
+    if (device or "auto").strip().lower() == "auto":
         logger.info(_("info.auto_detected_device").format(device=actual_device))
 
     # Get supported compute types for the device.
@@ -241,18 +266,19 @@ def select_best_compute_type(device: str) -> str:
         # Fallback to safe default
         return "int8" if actual_device == "cpu" else "float16"
 
-    # Define preference order
-    # Prefer bfloat16 > float16 > int8 types > float32
-    preference_order = [
-        "bfloat16",
-        "float16",
-        "int16",  # For CPU
-        "int8_bfloat16",
-        "int8_float16",
-        "int8_float32",
-        "int8",
-        "float32",  # Least preferred due to memory usage
-    ]
+    if actual_device == "cpu":
+        preference_order = ["int8", "int8_float32", "float32"]
+    else:
+        preference_order = [
+            "bfloat16",
+            "float16",
+            "int16",
+            "int8_bfloat16",
+            "int8_float16",
+            "int8_float32",
+            "int8",
+            "float32",
+        ]
 
     # Select the best available type based on preference
     for compute_type in preference_order:
@@ -264,6 +290,23 @@ def select_best_compute_type(device: str) -> str:
     default = "int8" if actual_device == "cpu" else "float16"
     logger.warning(_("warnings.no_preferred_compute_type").format(default=default))
     return default
+
+
+def require_local_runtime_assets(model_path: Path) -> None:
+    """Fail before inference if any local-only runtime asset is incomplete."""
+    issues = []
+    _checked, model_issues = validate_ct2_model(model_path)
+    _checked, vad_issues, _providers = validate_vad_assets(DEFAULT_MODELS_ROOT)
+    _checked, feature_issues = validate_feature_extractor(DEFAULT_MODELS_ROOT)
+    issues.extend(model_issues)
+    issues.extend(vad_issues)
+    issues.extend(feature_issues)
+    if issues:
+        detail = "\n".join(f"- {issue.path}: {issue.message}" for issue in issues)
+        raise RuntimeError(
+            "Local model assets are not ready; inference was not started.\n"
+            f"{detail}\nRun './dev.sh python scripts/macos_doctor.py --mode all'."
+        )
 
 
 def _coerce_bool(value: Any, *, default: bool = False) -> bool:
@@ -567,13 +610,16 @@ class Inference:
 
     def __init__(self, args):
         self.args = args
-        self.model_name_or_path = args.model_name_or_path
+        self.model_name_or_path = str(Path(args.model_name_or_path).expanduser().resolve())
         self.vad_injected = False
         self.vad_manager = None
-        self.device = (args.device or "auto").strip().lower()
-        if self.device in {"amd", "rocm", "hip"}:
-            # CTranslate2 HIP backend still uses the public device name "cuda".
-            self.device = "cuda"
+        self._runtime_ready = False
+        self.requested_device = (args.device or "auto").strip().lower()
+        self.device = resolve_device(self.requested_device)
+        self.cpu_threads = args.cpu_threads
+        self.vad_threads = args.vad_threads
+        if self.cpu_threads < 0 or self.vad_threads < 0:
+            raise ValueError("cpu_threads and vad_threads must be non-negative")
         # Auto-select compute type if 'auto' or 'default' is specified
         if args.compute_type in ["auto", "default"]:
             self.compute_type = select_best_compute_type(self.device)
@@ -603,9 +649,6 @@ class Inference:
             args
         )
 
-        # Setup VAD injection if requested
-        self._setup_vad_injection(args)
-
         logger.info(_("info.generation_config", config=self.generation_config))
         logger.info(
             "Segment merge: enabled=%s, max_gap_ms=%s, max_duration_ms=%s",
@@ -618,6 +661,15 @@ class Inference:
             self.smart_split_options.enabled,
             self.smart_split_options.target_chunk_duration_s,
         )
+
+    def _ensure_runtime_ready(self) -> None:
+        if self._runtime_ready:
+            return
+        os.environ.setdefault("HF_HUB_OFFLINE", "1")
+        os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+        require_local_runtime_assets(Path(self.model_name_or_path))
+        self._setup_vad_injection(self.args)
+        self._runtime_ready = True
 
     def _load_generation_config(self, args) -> tuple[dict[str, Any], SegmentMergeOptions, SmartSplitOptions]:
         """Load and process generation configuration"""
@@ -784,14 +836,14 @@ class Inference:
                 vad_config.speech_pad_ms = vad_params["speech_pad_ms"]
 
         # Load ONNX VAD configuration from metadata
-        vad_metadata_path = "models/whisper_vad_metadata.json"
-        vad_config.onnx_model_path = "models/whisper_vad.onnx"
-        vad_config.onnx_metadata_path = vad_metadata_path
+        vad_metadata_path = DEFAULT_MODELS_ROOT / "whisper_vad_metadata.json"
+        vad_config.onnx_model_path = str((DEFAULT_MODELS_ROOT / "whisper_vad.onnx").resolve())
+        vad_config.onnx_metadata_path = str(vad_metadata_path.resolve())
 
         # Read model configuration from metadata JSON if it exists
-        if os.path.exists(vad_metadata_path):
+        if vad_metadata_path.exists():
             try:
-                with open(vad_metadata_path) as f:
+                with vad_metadata_path.open(encoding="utf-8") as f:
                     metadata = json.load(f)
 
                 # Load model configuration from metadata
@@ -815,9 +867,8 @@ class Inference:
             vad_config.frame_duration_ms = 20
             vad_config.chunk_duration_ms = 30000
 
-        # Hardcoded runtime configuration
-        vad_config.force_cpu = False
-        vad_config.num_threads = 8
+        vad_config.force_cpu = self.device == "cpu"
+        vad_config.num_threads = self.vad_threads
 
         # Inject VAD with progress callback
         self.vad_manager = VadModelManager(
@@ -973,24 +1024,22 @@ class Inference:
     def generates(self, base_dirs):
         if len(base_dirs) == 0:
             logger.warning(_("warnings.provide_directories"))
-            return
+            return EXIT_NO_INPUT
 
         tasks = self._scan(base_dirs)
         if len(tasks) == 0:
             logger.info(_("info.no_files_found"))
-            return
+            return EXIT_OK if self.last_scan_supported_count > 0 else EXIT_NO_INPUT
+
+        self._ensure_runtime_ready()
 
         logger.info(_("tasks.processing", count=len(tasks), task=self.generation_config["task"]))
         logger.info(_("info.loading_whisper"))
 
         try:
-            WhisperModelCls, BatchedInferencePipelineCls = _require_faster_whisper()
+            _WhisperModelCls, BatchedInferencePipelineCls = _require_faster_whisper()
 
-            model = WhisperModelCls(
-                self.model_name_or_path,
-                device=self.device,
-                compute_type=self.compute_type,
-            )
+            model = self._create_whisper_model()
             logger.info(_("info.model_precision").format(precision=self.compute_type, device=self.device))
 
             # Setup batched inference if enabled
@@ -1114,6 +1163,16 @@ class Inference:
             if self.vad_injected:
                 uninject_vad()
                 logger.info(_("info.vad_deactivated"))
+        return EXIT_OK
+
+    def _create_whisper_model(self):
+        WhisperModelCls = _require_faster_whisper()[0]
+        return WhisperModelCls(
+            self.model_name_or_path,
+            device=self.device,
+            compute_type=self.compute_type,
+            cpu_threads=self.cpu_threads,
+        )
 
     def _find_executable_batch_size(self, model, sample_audio_path, min_batch_size=1, max_batch_size=64):
         """
@@ -1273,6 +1332,7 @@ class Inference:
 
     def _scan(self, base_dirs) -> list[InferenceTask]:
         tasks: list[InferenceTask] = []
+        self.last_scan_supported_count = 0
 
         def process(base_path, audio_path):
             nonlocal tasks
@@ -1286,6 +1346,7 @@ class Inference:
             if suffix not in self.audio_suffixes:
                 logger.debug(_("debug.skipped_suffix", suffix=suffix))
                 return
+            self.last_scan_supported_count += 1
 
             rel_path = p.relative_to(base_path)
             abs_path = Path(os.path.join(self.output_dir or base_path, rel_path))
@@ -1563,8 +1624,10 @@ def main():
     args = parse_arguments()
 
     # fix windows gbk pipe issue
-    sys.stdout.reconfigure(encoding="utf-8")
-    sys.stderr.reconfigure(encoding="utf-8")
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8")
     # Display open-source notice
     print("=" * 70)
     print("⚠️  重要声明 / IMPORTANT NOTICE")
@@ -1591,10 +1654,10 @@ def main():
             response = input("Continue with normal inference? (y/n): ").strip().lower()
             if response != "y":
                 print("Exiting...")
-                sys.exit(0)
+                return EXIT_OK
         except (KeyboardInterrupt, EOFError):
             print("\nExiting...")
-            sys.exit(0)
+            return EXIT_OK
 
     # Normal operation
     # Set logger to DEBUG so file handler captures everything;
@@ -1620,11 +1683,10 @@ def main():
 
     if len(args.base_dirs) == 0:
         logger.warning(_("warnings.drag_files"))
-        sys.exit(1)
+        return EXIT_NO_INPUT
 
     inference = Inference(args)
-    inference.generates(args.base_dirs)
-    sys.exit(0)
+    return inference.generates(args.base_dirs)
 
 
 if __name__ == "__main__":
@@ -1632,4 +1694,4 @@ if __name__ == "__main__":
     import os
 
     os.chdir(os.path.dirname(__file__))
-    main()
+    raise SystemExit(main())

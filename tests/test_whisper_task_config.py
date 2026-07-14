@@ -1,4 +1,6 @@
+import io
 import json
+import logging
 import sys
 import tempfile
 import types
@@ -18,8 +20,11 @@ from faster_whisper_transwithai_chickenrice.infer import (
     SpeechSpan,
     create_contiguous_chunks,
     enforce_segment_timeline,
+    require_local_runtime_assets,
+    select_best_compute_type,
     vad_segments_to_clip_timestamps,
 )
+from faster_whisper_transwithai_chickenrice.vad_manager import VadConfig, WhisperVadModel, WhisperVADOnnxWrapper
 
 
 def make_args(config_path: Path, task: str | None = None) -> Namespace:
@@ -36,6 +41,23 @@ def make_args(config_path: Path, task: str | None = None) -> Namespace:
         smart_split_with_vad=None,
         target_chunk_duration_s=None,
     )
+
+
+def make_full_args(config_path: Path, model_path: Path, *, compute_type: str = "auto") -> Namespace:
+    args = make_args(config_path)
+    args.model_name_or_path = str(model_path)
+    args.device = "cpu"
+    args.compute_type = compute_type
+    args.cpu_threads = 12
+    args.vad_threads = 4
+    args.enable_batching = False
+    args.batch_size = None
+    args.max_batch_size = 8
+    args.overwrite = False
+    args.output_dir = None
+    args.audio_suffixes = "wav,mp3"
+    args.sub_formats = "srt,vtt,lrc"
+    return args
 
 
 class WhisperTaskConfigTests(unittest.TestCase):
@@ -78,6 +100,136 @@ class WhisperTaskConfigTests(unittest.TestCase):
             )
 
         self.assertEqual(config["task"], "translate")
+
+
+class CpuRuntimePolicyTests(unittest.TestCase):
+    def test_cpu_auto_prefers_int8(self) -> None:
+        fake_ct2 = types.SimpleNamespace(
+            get_supported_compute_types=lambda _device: {"float32", "int8", "int8_float32"},
+            get_cuda_device_count=lambda: 0,
+        )
+        with mock.patch.object(infer_module, "ctranslate2", fake_ct2):
+            self.assertEqual(select_best_compute_type("cpu"), "int8")
+
+    def test_explicit_compute_type_and_threads_are_preserved(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            args = make_full_args(root / "config.json5", root / "model", compute_type="float32")
+            with (
+                mock.patch.object(infer_module, "require_local_runtime_assets"),
+                mock.patch.object(Inference, "_setup_vad_injection"),
+            ):
+                inference = Inference(args)
+
+        self.assertEqual(inference.compute_type, "float32")
+        self.assertEqual(inference.cpu_threads, 12)
+        self.assertEqual(inference.vad_threads, 4)
+
+    def test_cpu_threads_are_passed_to_whisper_model(self) -> None:
+        inference = Inference.__new__(Inference)
+        inference.model_name_or_path = "/models/translate"
+        inference.device = "cpu"
+        inference.compute_type = "int8"
+        inference.cpu_threads = 12
+        model_class = mock.Mock(return_value=object())
+
+        with mock.patch.object(infer_module, "_require_faster_whisper", return_value=(model_class, mock.Mock())):
+            inference._create_whisper_model()
+
+        model_class.assert_called_once_with(
+            "/models/translate", device="cpu", compute_type="int8", cpu_threads=12
+        )
+
+    def test_missing_main_model_fails_before_writing_subtitles(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            subtitle = root / "output.srt"
+            with self.assertRaisesRegex(RuntimeError, "inference was not started"):
+                require_local_runtime_assets(root / "missing-model")
+            self.assertFalse(subtitle.exists())
+
+    def test_all_existing_outputs_skip_without_loading_models(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            audio = root / "sample.wav"
+            audio.write_bytes(b"audio")
+            (root / "sample.srt").write_text("existing", encoding="utf-8")
+            args = make_full_args(root / "config.json5", root / "missing-model")
+            args.sub_formats = "srt"
+            inference = Inference(args)
+            with mock.patch.object(inference, "_ensure_runtime_ready") as ensure:
+                status = inference.generates([str(audio)])
+
+        self.assertEqual(status, infer_module.EXIT_OK)
+        ensure.assert_not_called()
+
+
+class VadRuntimePolicyTests(unittest.TestCase):
+    def test_cpu_vad_excludes_coreml_and_cuda(self) -> None:
+        class FakeSessionOptions:
+            inter_op_num_threads = 0
+            intra_op_num_threads = 0
+
+        class FakeSession:
+            def __init__(self, _path, *, providers, sess_options):
+                self.providers = providers
+                self.sess_options = sess_options
+
+            def get_inputs(self):
+                return [types.SimpleNamespace(name="input")]
+
+            def get_outputs(self):
+                return [types.SimpleNamespace(name="output")]
+
+            def get_providers(self):
+                return self.providers
+
+        fake_ort = types.SimpleNamespace(
+            SessionOptions=FakeSessionOptions,
+            InferenceSession=FakeSession,
+            get_available_providers=lambda: ["CoreMLExecutionProvider", "CUDAExecutionProvider", "CPUExecutionProvider"],
+        )
+        extractor = mock.Mock()
+        fake_transformers = types.SimpleNamespace(
+            WhisperFeatureExtractor=types.SimpleNamespace(from_pretrained=extractor)
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            model_path = root / "whisper_vad.onnx"
+            metadata_path = root / "whisper_vad_metadata.json"
+            model_path.write_bytes(b"onnx")
+            metadata_path.write_text("{}", encoding="utf-8")
+            (root / "whisper-base").mkdir()
+            (root / "whisper-base" / "preprocessor_config.json").write_text("{}", encoding="utf-8")
+            with mock.patch.dict(sys.modules, {"onnxruntime": fake_ort, "transformers": fake_transformers}):
+                wrapper = WhisperVADOnnxWrapper(
+                    str(model_path), str(metadata_path), force_cpu=True, num_threads=4
+                )
+
+        self.assertEqual(wrapper.session.get_providers(), ["CPUExecutionProvider"])
+        self.assertEqual(wrapper.session.sess_options.inter_op_num_threads, 1)
+        self.assertEqual(wrapper.session.sess_options.intra_op_num_threads, 4)
+        extractor.assert_called_once_with(str((root / "whisper-base").resolve()), local_files_only=True)
+
+    def test_missing_vad_file_raises_during_initialization(self) -> None:
+        config = VadConfig(onnx_model_path="/definitely/missing/vad.onnx")
+        with self.assertRaisesRegex(FileNotFoundError, "macos_doctor"):
+            WhisperVadModel(config)
+
+
+class MainCompatibilityTests(unittest.TestCase):
+    def test_main_accepts_streams_without_reconfigure(self) -> None:
+        args = Namespace(console=False, log_level="INFO", base_dirs=[])
+        with (
+            tempfile.TemporaryDirectory() as tmp_dir,
+            mock.patch.object(infer_module, "parse_arguments", return_value=args),
+            mock.patch.object(sys, "stdout", io.StringIO()),
+            mock.patch.object(sys, "stderr", io.StringIO()),
+            mock.patch("os.getcwd", return_value=tmp_dir),
+            mock.patch.object(infer_module.logging, "FileHandler", return_value=logging.NullHandler()),
+        ):
+            self.assertEqual(infer_module.main(), infer_module.EXIT_NO_INPUT)
 
 
 class VadClipTimestampTests(unittest.TestCase):

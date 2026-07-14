@@ -17,4 +17,4 @@ if __name__ == "__main__":
         os.chdir(os.path.dirname(sys.executable))
     else:
         os.chdir(os.path.dirname(__file__))
-    main()
+    raise SystemExit(main())
