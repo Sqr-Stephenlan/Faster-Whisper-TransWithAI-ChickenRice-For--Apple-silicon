@@ -1,0 +1,7 @@
+-r requirements-macos.txt
+
+pytest>=7
+pytest-cov>=4
+ruff==0.15.2
+mypy==1.18.2
+types-requests

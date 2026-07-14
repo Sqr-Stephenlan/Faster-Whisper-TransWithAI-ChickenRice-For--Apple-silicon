@@ -1,0 +1,15 @@
+# Exact versions verified on Apple M5 Pro / arm64 / Python 3.10.20.
+numpy==1.26.4
+librosa==0.11.0
+ctranslate2==4.8.1
+faster-whisper==1.2.1
+onnxruntime==1.23.2
+transformers==5.13.1
+pyjson5==2.0.1
+av==17.1.0
+tokenizers==0.22.2
+huggingface-hub==1.23.0
+requests==2.34.2
+markupsafe==2.1.5
+soundfile==0.14.0
+tqdm==4.68.4

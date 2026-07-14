@@ -1,0 +1,13 @@
+# Minimal macOS Apple Silicon CPU runtime.
+# Install with the validated versions in constraints-macos-arm64.txt:
+#   ./dev.sh pip install -r requirements-macos.txt -c constraints-macos-arm64.txt
+
+numpy
+librosa
+ctranslate2
+faster-whisper
+onnxruntime
+transformers
+pyjson5
+markupsafe
+requests
