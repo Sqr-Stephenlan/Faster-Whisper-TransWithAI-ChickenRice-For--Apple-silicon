@@ -14,6 +14,10 @@ import macos_launcher
 
 
 class MacOSLauncherTests(unittest.TestCase):
+    def test_doctor_command_checks_translation_profile(self) -> None:
+        script = (ROOT / "检查Mac环境.command").read_text(encoding="utf-8")
+        self.assertIn("scripts/macos_doctor.py --mode translate", script)
+
     def parse(self, mode: str, paths: list[str], extra: list[str] | None = None) -> list[str]:
         argv = ["--mode", mode, "--dry-run", *(extra or []), *paths]
         output = subprocess.run(

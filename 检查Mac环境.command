@@ -4,7 +4,7 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT"
 
-./dev.sh python scripts/macos_doctor.py --mode all
+./dev.sh python scripts/macos_doctor.py --mode translate
 status=$?
 if [ "${TRANSWITHAI_NO_PAUSE:-0}" != "1" ] && [ -t 0 ]; then
   echo

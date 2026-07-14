@@ -47,9 +47,9 @@
 
 翻译和转录是不同的 CT2 模型。仅把 --task 从 translate 改成 transcribe 不会把翻译模型变成转录模型，必须同时选择对应模型目录。
 
-严格检查（可双击“检查Mac环境.command”）：
+严格检查（可双击“检查Mac环境.command”；个人版默认只检查翻译资产）：
 
-  ./dev.sh python scripts/macos_doctor.py --mode all --json
+  ./dev.sh python scripts/macos_doctor.py --mode translate --json
 
 缺失、空文件、非法 JSON、ONNX 无法加载或 provider 错误都会返回非零退出码。只检查、不联网：
 
