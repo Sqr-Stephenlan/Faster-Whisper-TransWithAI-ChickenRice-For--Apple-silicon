@@ -64,7 +64,7 @@
 
 完全展开的翻译命令：
 
-  ./dev.sh python infer.py --model_name_or_path "$PWD/models/translate" --task translate --device cpu --compute_type int8 --cpu_threads 0 --vad_threads 8 --audio_suffixes "mp3,wav,flac,m4a,aac,ogg,wma,mp4,mkv,avi,mov,webm,flv,wmv" --sub_formats "srt,vtt,lrc" "/Users/me/日语 音频（测试）/第 1 集.m4a"
+  ./dev.sh python infer.py --model_name_or_path "$PWD/models/translate" --task translate --device cpu --compute_type int8 --cpu_threads 12 --vad_threads 4 --audio_suffixes "mp3,wav,flac,m4a,aac,ogg,wma,mp4,mkv,avi,mov,webm,flv,wmv" --sub_formats "srt,vtt,lrc" "/Users/me/日语 音频（测试）/第 1 集.m4a"
 
 默认生成 SRT、VTT、LRC。已存在的全部目标字幕且未指定 --overwrite 时会跳过并返回 0。可用 --overwrite 重做，用 --output_dir 指定含空格或中文的输出目录。
 

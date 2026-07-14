@@ -68,7 +68,7 @@ models/
 完全展开的命令行示例：
 
 ```bash
-./dev.sh python infer.py --model_name_or_path "$PWD/models/translate" --task translate --device cpu --compute_type int8 --cpu_threads 0 --vad_threads 8 --audio_suffixes "mp3,wav,flac,m4a,aac,ogg,wma,mp4,mkv,avi,mov,webm,flv,wmv" --sub_formats "srt,vtt,lrc" "/Users/me/日语 音频（测试）/第 1 集.m4a"
+./dev.sh python infer.py --model_name_or_path "$PWD/models/translate" --task translate --device cpu --compute_type int8 --cpu_threads 12 --vad_threads 4 --audio_suffixes "mp3,wav,flac,m4a,aac,ogg,wma,mp4,mkv,avi,mov,webm,flv,wmv" --sub_formats "srt,vtt,lrc" "/Users/me/日语 音频（测试）/第 1 集.m4a"
 ```
 
 运行日志写入仓库根目录的 `latest.log`。更多安装、离线和验收说明见 [使用说明](使用说明.txt) 中的“macOS Apple Silicon CPU”章节。

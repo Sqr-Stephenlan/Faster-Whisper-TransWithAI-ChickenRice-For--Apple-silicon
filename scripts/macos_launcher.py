@@ -78,8 +78,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--dry-run", action="store_true", help="Print the inference argv as JSON without running it")
     parser.add_argument("--output-dir")
     parser.add_argument("--overwrite", action="store_true")
-    parser.add_argument("--cpu-threads", type=int, default=0)
-    parser.add_argument("--vad-threads", type=int, default=8)
+    parser.add_argument("--cpu-threads", type=int, default=12)
+    parser.add_argument("--vad-threads", type=int, default=4)
     parser.add_argument("paths", nargs="*")
     args = parser.parse_args(argv)
     if args.cpu_threads < 0 or args.vad_threads < 0:

@@ -37,6 +37,8 @@ class MacOSLauncherTests(unittest.TestCase):
         self.assertEqual(command[command.index("--task") + 1], "translate")
         self.assertEqual(command[command.index("--device") + 1], "cpu")
         self.assertEqual(command[command.index("--compute_type") + 1], "int8")
+        self.assertEqual(command[command.index("--cpu_threads") + 1], "12")
+        self.assertEqual(command[command.index("--vad_threads") + 1], "4")
 
     def test_transcribe_uses_separate_model_and_output_directory(self) -> None:
         output_dir = "/tmp/字幕 输出（中文）"
