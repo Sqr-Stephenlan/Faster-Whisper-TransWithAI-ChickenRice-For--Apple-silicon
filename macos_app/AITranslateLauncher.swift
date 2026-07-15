@@ -288,6 +288,7 @@ final class LauncherViewModel: ObservableObject {
         TerminalLauncher.launch(
             projectRoot: projectRoot,
             launcherURL: launcherURL,
+            subtitleFormats: subtitleFormatsArgument,
             inputURLs: selectedURLs
         ) { [weak self] result in
             guard let self else { return }
@@ -307,13 +308,13 @@ private enum TerminalLauncher {
     on run argv
         set projectRoot to item 1 of argv
         set launcherPath to item 2 of argv
-        set inputPaths to items 3 thru (count argv) of argv
+        set launcherArguments to items 3 thru (count argv) of argv
 
         set shellCommand to "cd " & quoted form of projectRoot
         set shellCommand to shellCommand & " && " & quoted form of launcherPath
 
-        repeat with inputPath in inputPaths
-            set shellCommand to shellCommand & " " & quoted form of (contents of inputPath)
+        repeat with launcherArgument in launcherArguments
+            set shellCommand to shellCommand & " " & quoted form of (contents of launcherArgument)
         end repeat
 
         tell application "Terminal"
@@ -326,13 +327,21 @@ private enum TerminalLauncher {
     static func launch(
         projectRoot: URL,
         launcherURL: URL,
+        subtitleFormats: String,
         inputURLs: [URL],
         completion: @escaping (Result<Void, Error>) -> Void
     ) {
         let process = Process()
         let errorPipe = Pipe()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        process.arguments = ["-e", script, projectRoot.path, launcherURL.path] + inputURLs.map(\.path)
+        process.arguments = [
+            "-e",
+            script,
+            projectRoot.path,
+            launcherURL.path,
+            "--sub-formats",
+            subtitleFormats,
+        ] + inputURLs.map(\.path)
         process.standardError = errorPipe
 
         process.terminationHandler = { completedProcess in
