@@ -82,7 +82,7 @@ chmod 755 "$EXECUTABLE"
 
 "$ICON_RENDERER" "$ICON_SOURCE" "$ICONSET_DIR" "$ICON_TIFF"
 tiff2icns "$ICON_TIFF" "$ICON_FILE"
-"$ICON_RENDERER" --add-1024 "$ICONSET_DIR/icon_512x512@2x.png" "$ICON_FILE"
+"$ICON_RENDERER" --add-retina "$ICONSET_DIR" "$ICON_FILE"
 
 cat >"$PLIST" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -108,7 +108,7 @@ cat >"$PLIST" <<'PLIST'
     <key>CFBundleShortVersionString</key>
     <string>1.1.0</string>
     <key>CFBundleVersion</key>
-    <string>2</string>
+    <string>3</string>
     <key>LSMinimumSystemVersion</key>
     <string>13.0</string>
     <key>NSAppleEventsUsageDescription</key>

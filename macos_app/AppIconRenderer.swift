@@ -13,6 +13,11 @@ private struct ICNSChunk {
     let payload: Data
 }
 
+private struct RetinaEntry {
+    let type: String
+    let filename: String
+}
+
 private enum RendererError: LocalizedError {
     case invalidArguments
     case unreadableSVG(String)
@@ -27,7 +32,7 @@ private enum RendererError: LocalizedError {
         switch self {
         case .invalidArguments:
             return "用法：AppIconRenderer <AppIcon.svg> <AppIcon.iconset> <AppIcon.tiff>，" +
-                "或 AppIconRenderer --add-1024 <1024.png> <AppIcon.icns>"
+                "或 AppIconRenderer --add-retina <AppIcon.iconset> <AppIcon.icns>"
         case let .unreadableSVG(path):
             return "无法读取 SVG：\(path)"
         case let .bitmapCreationFailed(pixels):
@@ -59,6 +64,14 @@ private let iconEntries = [
     IconEntry(filename: "icon_512x512@2x.png", pixels: 1024),
 ]
 
+private let retinaEntries = [
+    RetinaEntry(type: "ic11", filename: "icon_16x16@2x.png"),
+    RetinaEntry(type: "ic12", filename: "icon_32x32@2x.png"),
+    RetinaEntry(type: "ic13", filename: "icon_128x128@2x.png"),
+    RetinaEntry(type: "ic14", filename: "icon_256x256@2x.png"),
+    RetinaEntry(type: "ic10", filename: "icon_512x512@2x.png"),
+]
+
 private func appendFourCC(_ value: String, to data: inout Data) {
     data.append(contentsOf: value.utf8)
 }
@@ -76,12 +89,11 @@ private func readUInt32(from data: Data, at offset: Int) -> Int {
     }
 }
 
-private func add1024PNG(_ pngURL: URL, to icnsURL: URL) throws {
+private func addRetinaPNGs(from iconsetDirectory: URL, to icnsURL: URL) throws {
     let icnsData = try Data(contentsOf: icnsURL)
-    let pngData = try Data(contentsOf: pngURL)
     let icnsMagic = Data("icns".utf8)
     let tocType = Data("TOC ".utf8)
-    let icon1024Type = Data("ic10".utf8)
+    let retinaTypes = retinaEntries.map { Data($0.type.utf8) }
 
     guard icnsData.count >= 8, icnsData.prefix(4) == icnsMagic else {
         throw RendererError.invalidICNS(icnsURL.path)
@@ -96,7 +108,7 @@ private func add1024PNG(_ pngURL: URL, to icnsURL: URL) throws {
             throw RendererError.invalidICNS(icnsURL.path)
         }
 
-        if type != tocType, type != icon1024Type {
+        if type != tocType, !retinaTypes.contains(type) {
             chunks.append(
                 ICNSChunk(
                     type: type,
@@ -111,7 +123,15 @@ private func add1024PNG(_ pngURL: URL, to icnsURL: URL) throws {
         throw RendererError.invalidICNS(icnsURL.path)
     }
 
-    chunks.append(ICNSChunk(type: icon1024Type, payload: pngData))
+    for entry in retinaEntries {
+        let pngURL = iconsetDirectory.appendingPathComponent(entry.filename)
+        chunks.append(
+            ICNSChunk(
+                type: Data(entry.type.utf8),
+                payload: try Data(contentsOf: pngURL)
+            )
+        )
+    }
     let tocSize = 8 + chunks.count * 8
     let totalSize = 8 + tocSize + chunks.reduce(0) { size, chunk in
         size + 8 + chunk.payload.count
@@ -220,10 +240,10 @@ do {
         throw RendererError.invalidArguments
     }
 
-    if CommandLine.arguments[1] == "--add-1024" {
-        let pngURL = URL(fileURLWithPath: CommandLine.arguments[2])
+    if CommandLine.arguments[1] == "--add-retina" {
+        let iconsetDirectory = URL(fileURLWithPath: CommandLine.arguments[2], isDirectory: true)
         let icnsURL = URL(fileURLWithPath: CommandLine.arguments[3])
-        try add1024PNG(pngURL, to: icnsURL)
+        try addRetinaPNGs(from: iconsetDirectory, to: icnsURL)
     } else {
         let svgURL = URL(fileURLWithPath: CommandLine.arguments[1])
         let outputDirectory = URL(fileURLWithPath: CommandLine.arguments[2], isDirectory: true)
