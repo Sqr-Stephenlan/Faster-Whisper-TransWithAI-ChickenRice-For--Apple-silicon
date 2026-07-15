@@ -201,3 +201,25 @@ models/
 testdata/local/
 benchmarks/local/
 latest.log
+
+# Protected local working documents
+# Keep these files on disk, but do not add them to Git or remove them during cleanup.
+*_TASK.md
+*_PLAN.md
+*_RESULT.md
+*_REPORT.md
+*_HANDOFF.md
+*_OPERATIONS.md
+*_INSTRUCTIONS.md
+*任务*.md
+*任务书*.md
+*实施说明*.md
+*执行说明*.md
+*结果*.md
+*验收*.md
+*报告*.md
+*续接*.md
+*交接*.md
+*操作说明*.md
+*使用说明*.md
+*使用说明*.txt
