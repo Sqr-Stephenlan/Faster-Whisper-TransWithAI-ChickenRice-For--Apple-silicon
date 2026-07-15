@@ -6,7 +6,7 @@
 
 - 日语音视频转中文字幕，支持 SRT、VTT、LRC
 - 使用独立模型执行日文原文转录
-- Finder 双击选择文件，也支持终端批量传入文件或目录
+- 原生 macOS 拖拽窗口，也支持 Finder 选择和终端批量传入文件或目录
 - 模型完整后可离线推理
 - 可选 Modal 云端 GPU 推理
 
@@ -59,7 +59,24 @@ models/
 
 ## 运行
 
-在 Finder 中双击：
+推荐使用项目根目录的图形入口：
+
+1. 双击 `AI语音翻译.app`。
+2. 拖入一个或多个音视频文件、文件夹，或点击拖拽区域选择。
+3. 确认列表后点击“开始翻译”。
+4. 在自动打开的 Terminal 中查看处理状态。
+
+字幕默认写入源文件旁，格式为 SRT、VTT、LRC。`AI语音翻译.app` 必须留在本项目根目录中与 `.venv`、`models` 和启动脚本配套使用，不要单独移动到 `/Applications`。
+
+如果 App 缺失或 Swift 源码有更新，可重新构建：
+
+```bash
+./scripts/build_macos_app.sh
+```
+
+首次启动 Terminal 时，macOS 可能询问是否允许 App 控制 Terminal，请按系统提示授权。
+
+原有 Finder/终端入口仍可使用。在 Finder 中双击：
 
 - `检查Mac环境.command`
 - `运行(翻译)(CPU).command`
@@ -74,7 +91,7 @@ models/
 
 支持一次传入多个文件、包含空格或中文的路径，以及整个目录。默认在源文件旁生成字幕；已有全部目标字幕时会跳过。使用 `--overwrite` 可覆盖，使用 `--output-dir` 可指定输出目录。
 
-详细操作见 [MACOS翻译操作说明.md](MACOS翻译操作说明.md) 和 [使用说明.txt](使用说明.txt)。
+详细操作见 [AI语音翻译App简明使用说明.md](AI语音翻译App简明使用说明.md)、[MACOS翻译操作说明.md](MACOS翻译操作说明.md) 和 [使用说明.txt](使用说明.txt)。
 
 ## Modal 云端推理（可选）
 
