@@ -17,7 +17,24 @@ MODEL_DIRS = {
     "transcribe": ROOT / "models" / "transcribe",
 }
 DEFAULT_AUDIO_SUFFIXES = "mp3,wav,flac,m4a,aac,ogg,wma,mp4,mkv,avi,mov,webm,flv,wmv"
-DEFAULT_SUB_FORMATS = "srt,vtt,lrc"
+SUPPORTED_SUB_FORMATS = ("srt", "vtt", "lrc")
+DEFAULT_SUB_FORMATS = ",".join(SUPPORTED_SUB_FORMATS)
+
+
+def parse_sub_formats(value: str) -> str:
+    """Validate and canonicalize the GUI-supported subtitle formats."""
+    items = value.split(",")
+    if any(not item.strip() for item in items):
+        raise argparse.ArgumentTypeError("subtitle formats must be a non-empty comma-separated list")
+
+    requested = {item.strip().lower() for item in items}
+    unsupported = requested.difference(SUPPORTED_SUB_FORMATS)
+    if unsupported:
+        choices = ", ".join(SUPPORTED_SUB_FORMATS)
+        invalid = ", ".join(sorted(unsupported))
+        raise argparse.ArgumentTypeError(f"unsupported subtitle format(s): {invalid}; choose from {choices}")
+
+    return ",".join(format_name for format_name in SUPPORTED_SUB_FORMATS if format_name in requested)
 
 
 def choose_files() -> list[str] | None:
@@ -62,7 +79,7 @@ def build_infer_argv(args: argparse.Namespace, paths: list[str]) -> list[str]:
         "--audio_suffixes",
         DEFAULT_AUDIO_SUFFIXES,
         "--sub_formats",
-        DEFAULT_SUB_FORMATS,
+        args.sub_formats,
     ]
     if args.output_dir:
         argv.extend(["--output_dir", str(Path(args.output_dir).expanduser())])
@@ -80,6 +97,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--cpu-threads", type=int, default=12)
     parser.add_argument("--vad-threads", type=int, default=4)
+    parser.add_argument(
+        "--sub-formats",
+        "--sub_formats",
+        dest="sub_formats",
+        type=parse_sub_formats,
+        default=DEFAULT_SUB_FORMATS,
+        help="Comma-separated subtitle formats: srt, vtt, lrc (default: all)",
+    )
     parser.add_argument("paths", nargs="*")
     args = parser.parse_args(argv)
     if args.cpu_threads < 0 or args.vad_threads < 0:
