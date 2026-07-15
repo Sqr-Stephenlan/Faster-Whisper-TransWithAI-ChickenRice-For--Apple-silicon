@@ -6,6 +6,14 @@ private let supportedMediaExtensions: Set<String> = [
     "mp4", "mkv", "avi", "mov", "webm", "flv", "wmv",
 ]
 
+enum SubtitleFormat: String, CaseIterable, Hashable {
+    case srt
+    case vtt
+    case lrc
+
+    var displayName: String { rawValue.uppercased() }
+}
+
 @main
 struct AITranslateLauncherApp: App {
     @StateObject private var viewModel = LauncherViewModel()
@@ -59,6 +67,17 @@ struct LauncherView: View {
             }
             .frame(height: 132)
 
+            HStack(alignment: .center, spacing: 10) {
+                Text("输出字幕格式")
+                    .font(.headline)
+
+                Spacer(minLength: 4)
+
+                ForEach(SubtitleFormat.allCases, id: \.self) { format in
+                    subtitleFormatTag(format)
+                }
+            }
+
             VStack(alignment: .leading, spacing: 7) {
                 Text("已选择 \(viewModel.selectedURLs.count) 项")
                     .font(.headline)
@@ -101,7 +120,7 @@ struct LauncherView: View {
             }
         }
         .padding(24)
-        .frame(width: 520, height: 360)
+        .frame(width: 520, height: 416)
         .alert(
             "提示",
             isPresented: Binding(
@@ -116,16 +135,60 @@ struct LauncherView: View {
             Text(viewModel.alertMessage ?? "")
         }
     }
+
+    private func subtitleFormatTag(_ format: SubtitleFormat) -> some View {
+        let isSelected = viewModel.selectedSubtitleFormats.contains(format)
+
+        return Button {
+            viewModel.toggleSubtitleFormat(format)
+        } label: {
+            HStack(spacing: 5) {
+                if isSelected {
+                    Image(systemName: "checkmark")
+                        .font(.caption.weight(.bold))
+                }
+                Text(format.displayName)
+                    .font(.subheadline.weight(.semibold))
+            }
+            .padding(.horizontal, 11)
+            .padding(.vertical, 7)
+            .foregroundStyle(isSelected ? Color.white : Color.primary)
+            .background {
+                Capsule()
+                    .fill(isSelected ? Color.accentColor : Color.secondary.opacity(0.08))
+            }
+            .overlay {
+                Capsule()
+                    .strokeBorder(
+                        isSelected ? Color.accentColor : Color.secondary.opacity(0.45),
+                        lineWidth: 1
+                    )
+            }
+        }
+        .buttonStyle(.plain)
+        .disabled(viewModel.isLaunching)
+        .accessibilityLabel("\(format.displayName) 字幕格式")
+        .accessibilityValue(isSelected ? "已选择" : "未选择")
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
+    }
 }
 
 @MainActor
 final class LauncherViewModel: ObservableObject {
     @Published var selectedURLs: [URL] = []
+    @Published var selectedSubtitleFormats: Set<SubtitleFormat> = Set(SubtitleFormat.allCases)
     @Published var isDropTargeted = false
     @Published var isLaunching = false
     @Published var alertMessage: String?
 
     private let fileManager = FileManager.default
+
+    var subtitleFormatsArgument: String {
+        SubtitleFormat.allCases
+            .filter(selectedSubtitleFormats.contains)
+            .map(\.rawValue)
+            .joined(separator: ",")
+    }
 
     func isDirectory(_ url: URL) -> Bool {
         var isDirectory = ObjCBool(false)
@@ -187,6 +250,20 @@ final class LauncherViewModel: ObservableObject {
     func clear() {
         guard !isLaunching else { return }
         selectedURLs.removeAll()
+    }
+
+    func toggleSubtitleFormat(_ format: SubtitleFormat) {
+        guard !isLaunching else { return }
+
+        if selectedSubtitleFormats.contains(format) {
+            guard selectedSubtitleFormats.count > 1 else {
+                alertMessage = "至少选择一种字幕格式。"
+                return
+            }
+            selectedSubtitleFormats.remove(format)
+        } else {
+            selectedSubtitleFormats.insert(format)
+        }
     }
 
     func startTranslation() {
