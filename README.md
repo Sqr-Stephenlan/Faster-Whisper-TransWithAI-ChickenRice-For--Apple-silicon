@@ -1,6 +1,6 @@
 # Faster Whisper TransWithAI ChickenRice for macOS
 
-面向 Apple Silicon Mac 的日语音视频转录与日译中工具。项目从源码运行 Faster Whisper 和音声优化 VAD，主模型使用 CTranslate2 CPU `int8` 推理；本地运行不依赖 Metal、MPS、CoreML 或独立显卡。
+面向 Apple Silicon Mac 的日语音视频转录与日译中工具。日译中可使用 MLX/Metal GPU FP16 推理，并保留 Faster-Whisper/CTranslate2 CPU `int8` 回退；音频解码、增强 VAD、智能切块和字幕后处理继续在 CPU 上运行。
 
 ## 功能
 
@@ -8,6 +8,7 @@
 - 使用独立模型执行日文原文转录
 - 原生 macOS 拖拽窗口，也支持 Finder 选择和终端批量传入文件或目录
 - 模型完整后可离线推理
+- Apple Silicon 上可选择 MLX/Metal GPU 翻译；显式 MLX 预检失败时不会静默回退
 - 可选 Modal 云端 GPU 推理
 
 ## 环境要求
@@ -29,7 +30,7 @@
 ./dev.sh bootstrap
 ```
 
-运行依赖来自 `requirements-macos.txt`，并由 `constraints-macos-arm64.txt` 锁定已验证版本。测试和静态检查依赖位于 `requirements-dev.txt`。
+CPU 运行依赖来自 `requirements-macos.txt`，并由 `constraints-macos-arm64.txt` 锁定已验证版本。MLX 的附加依赖位于 `requirements-macos-mlx.txt`，正式运行还需安装独立转换项目生成的 `mlx_whisper_runtime_local-0.4.3+runtime.1` wheel；该 wheel 不依赖 PyTorch。测试和静态检查依赖位于 `requirements-dev.txt`。
 
 ## 准备模型
 
@@ -48,13 +49,18 @@ models/
 ├── whisper_vad_metadata.json
 ├── whisper-base/
 ├── translate/
-└── transcribe/
+├── transcribe/
+└── mlx/
+    ├── translate/fp16/
+    └── transcribe/fp16/  # 后续转录模型，未安装时会明确报告不可用
 ```
 
 严格检查翻译资产：
 
 ```bash
 ./dev.sh python scripts/macos_doctor.py --mode translate
+./dev.sh python scripts/macos_doctor.py --mode translate --backend mlx
+./dev.sh python scripts/backend_probe.py --profile translate
 ```
 
 ## 运行
@@ -66,6 +72,8 @@ models/
 3. 在拖拽区下方选择输出字幕格式；默认 SRT、VTT、LRC 全选，且至少保留一种。
 4. 确认列表后点击“开始翻译”。
 5. 在自动打开的 Terminal 中查看处理状态。
+
+当前 `AI语音翻译.app` 仍使用稳定的 CT2 CPU 翻译入口；App UI 分支可直接消费本分支提供的 `--backend`、profile 探测和标准错误信息。
 
 字幕默认写入源文件旁。已存在的所选格式按现有规则跳过，只补写缺失的所选格式；本次未选择的格式不会生成。`AI语音翻译.app` 必须留在本项目根目录中与 `.venv`、`models` 和启动脚本配套使用，不要单独移动到 `/Applications`。
 
@@ -81,12 +89,14 @@ models/
 
 - `检查Mac环境.command`
 - `运行(翻译)(CPU).command`
+- `运行(翻译)(GPU-MLX).command`
 - `运行(转录)(CPU).command`
 
 也可在终端运行：
 
 ```bash
 './运行(翻译)(CPU).command' "/完整路径/日语音频.mp3"
+'./运行(翻译)(GPU-MLX).command' "/完整路径/日语音频.mp3"
 './运行(转录)(CPU).command' "/完整路径/日语音频.mp3"
 ```
 
@@ -99,6 +109,16 @@ models/
 ```
 
 支持一次传入多个文件、包含空格或中文的路径，以及整个目录。已有全部所选字幕时会跳过。使用 `--overwrite` 可覆盖，使用 `--output-dir` 可指定输出目录。
+
+底层 CLI 支持：
+
+```bash
+./dev.sh python infer.py --backend auto --task translate "/完整路径/日语音频.mp3"
+./dev.sh python infer.py --backend ct2 --task translate "/完整路径/日语音频.mp3"
+./dev.sh python infer.py --backend mlx --model-variant fp16 --task translate "/完整路径/日语音频.mp3"
+```
+
+`auto` 在 Apple Silicon 上优先选择通过预检的 MLX；只有开始处理文件之前的预检失败时才回退 CT2。处理中不会混用后端。
 
 详细操作见 [AI语音翻译App简明使用说明.md](AI语音翻译App简明使用说明.md)、[MACOS翻译操作说明.md](MACOS翻译操作说明.md) 和 [使用说明.txt](使用说明.txt)。
 
@@ -126,6 +146,9 @@ python modal_infer.py
 ./dev.sh mypy --config-file pyproject.toml src infer.py download_models.py modal_infer.py scripts
 ./dev.sh python -m compileall -q infer.py download_models.py modal_infer.py scripts src tests
 ./dev.sh pip check
+./dev.sh python scripts/benchmark_backends.py \
+  --backend mlx --repeats 3 \
+  "/完整路径/日语音频.mp3"
 ```
 
 本地测试媒体、字幕、基准结果、日志和缓存不得提交 Git。

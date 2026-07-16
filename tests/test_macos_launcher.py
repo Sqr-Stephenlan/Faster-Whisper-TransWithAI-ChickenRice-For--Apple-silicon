@@ -55,6 +55,7 @@ class MacOSLauncherTests(unittest.TestCase):
 
         self.assertEqual(command[-3:], paths)
         self.assertIn(str(ROOT / "models" / "translate"), command)
+        self.assertEqual(command[command.index("--backend") + 1], "ct2")
         self.assertEqual(command[command.index("--task") + 1], "translate")
         self.assertEqual(command[command.index("--device") + 1], "cpu")
         self.assertEqual(command[command.index("--compute_type") + 1], "int8")
@@ -173,6 +174,24 @@ class MacOSLauncherTests(unittest.TestCase):
         self.assertEqual(command[command.index("--task") + 1], "transcribe")
         self.assertEqual(command[command.index("--output_dir") + 1], output_dir)
         self.assertEqual(command[-1], "/tmp/input folder")
+
+    def test_mlx_translation_uses_fp16_model_and_never_adds_ct2_cpu_flags(self) -> None:
+        command = self.parse(
+            "translate",
+            ["/tmp/input.mp3"],
+            ["--backend", "mlx"],
+        )
+
+        self.assertEqual(command[command.index("--backend") + 1], "mlx")
+        self.assertIn(str(ROOT / "models" / "mlx" / "translate" / "fp16"), command)
+        self.assertEqual(command[command.index("--model-variant") + 1], "fp16")
+        self.assertEqual(command[command.index("--device") + 1], "gpu")
+        self.assertEqual(command[command.index("--compute_type") + 1], "float16")
+
+    def test_gpu_command_uses_explicit_mlx_backend(self) -> None:
+        script = (ROOT / "运行(翻译)(GPU-MLX).command").read_text(encoding="utf-8")
+
+        self.assertIn("--mode translate --backend mlx", script)
 
     def test_dry_run_without_paths_does_not_open_finder(self) -> None:
         with mock.patch.object(macos_launcher, "choose_files") as chooser:

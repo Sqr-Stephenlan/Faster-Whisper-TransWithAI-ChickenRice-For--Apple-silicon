@@ -1,0 +1,15 @@
+# Additional Apple Silicon MLX runtime dependencies.
+# Install after requirements-macos.txt, then install the pinned local runtime-only wheel:
+#
+#   ./dev.sh pip install -r requirements-macos-mlx.txt
+#   ./dev.sh pip install /path/to/mlx_whisper_runtime_local-0.4.3+runtime.1-py3-none-any.whl
+#
+# The local wheel is intentionally not fetched from an index and does not depend on PyTorch.
+
+mlx==0.32.0
+more-itertools==11.1.0
+numba==0.66.0
+scipy==1.15.3
+tiktoken==0.13.0
+huggingface-hub==1.23.0
+tqdm==4.68.4
