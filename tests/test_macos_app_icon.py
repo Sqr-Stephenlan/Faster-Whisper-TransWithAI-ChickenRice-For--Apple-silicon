@@ -46,7 +46,7 @@ class MacOSAppIconTests(unittest.TestCase):
             info = plistlib.load(file)
 
         self.assertEqual(info["CFBundleIconFile"], "AppIcon.icns")
-        self.assertEqual(info["CFBundleVersion"], "3")
+        self.assertEqual(info["CFBundleVersion"], "4")
 
 
 if __name__ == "__main__":
