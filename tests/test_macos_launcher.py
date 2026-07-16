@@ -62,6 +62,11 @@ class MacOSLauncherTests(unittest.TestCase):
         self.assertEqual(command[command.index("--cpu_threads") + 1], "12")
         self.assertEqual(command[command.index("--vad_threads") + 1], "4")
 
+    def test_cpu_command_uses_explicit_ct2_backend(self) -> None:
+        script = (ROOT / "运行(翻译)(CPU).command").read_text(encoding="utf-8")
+
+        self.assertIn("--mode translate --backend ct2", script)
+
     def test_default_subtitle_formats_preserve_existing_behavior(self) -> None:
         command = self.parse("translate", ["/tmp/input.mp3"])
 
@@ -187,6 +192,7 @@ class MacOSLauncherTests(unittest.TestCase):
         self.assertEqual(command[command.index("--model-variant") + 1], "fp16")
         self.assertEqual(command[command.index("--device") + 1], "gpu")
         self.assertEqual(command[command.index("--compute_type") + 1], "float16")
+        self.assertNotIn(str(ROOT / "models" / "translate"), command)
 
     def test_gpu_command_uses_explicit_mlx_backend(self) -> None:
         script = (ROOT / "运行(翻译)(GPU-MLX).command").read_text(encoding="utf-8")
