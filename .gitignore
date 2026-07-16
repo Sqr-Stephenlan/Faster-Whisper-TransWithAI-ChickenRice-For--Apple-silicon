@@ -202,6 +202,17 @@ testdata/local/
 benchmarks/local/
 latest.log
 
+# Local root-level acceptance media
+/*.mp3
+/*.wav
+/*.flac
+/*.m4a
+/*.aac
+/*.ogg
+/*.mp4
+/*.mkv
+/*.mov
+
 # Protected local working documents
 # Keep these files on disk, but do not add them to Git or remove them during cleanup.
 *_TASK.md

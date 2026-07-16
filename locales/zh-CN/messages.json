@@ -6,6 +6,8 @@
 
   "args": {
     "model_path": "Whisper模型路径",
+    "backend": "推理后端：auto、ct2 或 mlx",
+    "model_variant": "后端模型变体（例如 fp16）",
     "device": "运行模型的设备 (cpu, cuda, auto)",
     "compute_type": "模型计算类型",
     "overwrite": "覆盖现有字幕文件",
@@ -43,7 +45,11 @@
     "platform": "运行平台：{platform}",
     "arguments": "运行参数：{args}",
     "auto_detected_device": "自动检测到设备：{device}",
-    "auto_selected_compute_type": "自动选择计算类型 '{compute_type}'，设备：'{device}'"
+    "auto_selected_compute_type": "自动选择计算类型 '{compute_type}'，设备：'{device}'",
+    "backend_selected": "已选择后端：{backend}；任务配置：{profile}；模型：{model}",
+    "backend_metrics": "后端指标：{metrics}",
+    "stage_timing": "阶段计时：{stage} = {seconds:0.3f} 秒",
+    "file_timing": "本文件总耗时：{total:0.3f} 秒；字幕后处理：{postprocess:0.3f} 秒；写入：{write:0.3f} 秒"
   },
 
   "tasks": {
@@ -77,7 +83,9 @@
     "using_default_vad": "使用默认VAD配置",
     "vad_file_not_found": "在 {path} 未找到VAD元数据文件",
     "compute_types_unavailable": "无法获取设备 {device} 支持的计算类型：{error}",
-    "no_preferred_compute_type": "未找到首选计算类型，使用默认值 '{default}'"
+    "no_preferred_compute_type": "未找到首选计算类型，使用默认值 '{default}'",
+    "backend_auto_fallback": "自动后端预检后改用 {backend}：{reason}",
+    "backend_options_ignored": "{backend} 后端忽略了不兼容的遗留配置：{options}"
   },
 
   "progress": {

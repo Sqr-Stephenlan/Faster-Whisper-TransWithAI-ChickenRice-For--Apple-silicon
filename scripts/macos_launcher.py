@@ -13,8 +13,14 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 INFER_SCRIPT = ROOT / "infer.py"
 MODEL_DIRS = {
-    "translate": ROOT / "models" / "translate",
-    "transcribe": ROOT / "models" / "transcribe",
+    "translate": {
+        "ct2": ROOT / "models" / "translate",
+        "mlx": ROOT / "models" / "mlx" / "translate" / "fp16",
+    },
+    "transcribe": {
+        "ct2": ROOT / "models" / "transcribe",
+        "mlx": ROOT / "models" / "mlx" / "transcribe" / "fp16",
+    },
 }
 DEFAULT_AUDIO_SUFFIXES = "mp3,wav,flac,m4a,aac,ogg,wma,mp4,mkv,avi,mov,webm,flv,wmv"
 SUPPORTED_SUB_FORMATS = ("srt", "vtt", "lrc")
@@ -64,14 +70,10 @@ def build_infer_argv(args: argparse.Namespace, paths: list[str]) -> list[str]:
     argv = [
         sys.executable,
         str(INFER_SCRIPT),
-        "--model_name_or_path",
-        str(MODEL_DIRS[args.mode]),
+        "--backend",
+        args.backend,
         "--task",
         args.mode,
-        "--device",
-        "cpu",
-        "--compute_type",
-        "int8",
         "--cpu_threads",
         str(args.cpu_threads),
         "--vad_threads",
@@ -81,6 +83,12 @@ def build_infer_argv(args: argparse.Namespace, paths: list[str]) -> list[str]:
         "--sub_formats",
         args.sub_formats,
     ]
+    if args.backend != "auto":
+        argv.extend(["--model_name_or_path", str(MODEL_DIRS[args.mode][args.backend])])
+    if args.backend == "mlx":
+        argv.extend(["--model-variant", args.model_variant, "--device", "gpu", "--compute_type", "float16"])
+    else:
+        argv.extend(["--device", "cpu", "--compute_type", "int8"])
     if args.output_dir:
         argv.extend(["--output_dir", str(Path(args.output_dir).expanduser())])
     if args.overwrite:
@@ -92,6 +100,8 @@ def build_infer_argv(args: argparse.Namespace, paths: list[str]) -> list[str]:
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", choices=("translate", "transcribe"), required=True)
+    parser.add_argument("--backend", choices=("auto", "ct2", "mlx"), default="ct2")
+    parser.add_argument("--model-variant", default="fp16")
     parser.add_argument("--dry-run", action="store_true", help="Print the inference argv as JSON without running it")
     parser.add_argument("--output-dir")
     parser.add_argument("--overwrite", action="store_true")

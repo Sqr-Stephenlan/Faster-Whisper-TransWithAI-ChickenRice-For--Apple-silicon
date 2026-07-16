@@ -13,6 +13,13 @@ sys.modules.setdefault("pyjson5", types.SimpleNamespace(decode_io=json.load))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import faster_whisper_transwithai_chickenrice.infer as infer_module
+from faster_whisper_transwithai_chickenrice.backends.base import (
+    BackendRequest,
+    BackendResult,
+    BackendSegment,
+    ModelDescriptor,
+)
+from faster_whisper_transwithai_chickenrice.backends.ct2 import CTranslate2Backend
 from faster_whisper_transwithai_chickenrice.infer import (
     AudioChunk,
     Inference,
@@ -126,17 +133,29 @@ class CpuRuntimePolicyTests(unittest.TestCase):
         self.assertEqual(inference.vad_threads, 4)
 
     def test_cpu_threads_are_passed_to_whisper_model(self) -> None:
-        inference = Inference.__new__(Inference)
-        inference.model_name_or_path = "/models/translate"
-        inference.device = "cpu"
-        inference.compute_type = "int8"
-        inference.cpu_threads = 12
-        model_class = mock.Mock(return_value=object())
-
-        with mock.patch.object(infer_module, "_require_faster_whisper", return_value=(model_class, mock.Mock())):
-            inference._create_whisper_model()
+        model = mock.Mock()
+        model.transcribe.return_value = (
+            [mock.Mock(start=0.0, end=1.2, text="translated")],
+            mock.Mock(duration=1.0, duration_after_vad=1.0, language="ja"),
+        )
+        model_class = mock.Mock(return_value=model)
+        backend = CTranslate2Backend(
+            ModelDescriptor(
+                backend="ct2",
+                profile="translate",
+                variant="int8",
+                path=Path("/models/translate"),
+            ),
+            device="cpu",
+            compute_type="int8",
+            cpu_threads=12,
+            model_class=model_class,
+            batched_pipeline_class=mock.Mock(),
+        )
+        result = backend.transcribe(BackendRequest(audio="audio.mp3", language="ja", task="translate"))
 
         model_class.assert_called_once_with("/models/translate", device="cpu", compute_type="int8", cpu_threads=12)
+        self.assertEqual(result.segments[0].end, 1.0)
 
     def test_missing_main_model_fails_before_writing_subtitles(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -307,17 +326,22 @@ class SmartSplitTests(unittest.TestCase):
             {"start": 48_000, "end": 64_000},
         ]
 
-        class FakeModel:
+        class FakeBackend:
             def __init__(self) -> None:
                 self.calls = []
 
-            def transcribe(self, audio, **config):
-                self.calls.append((len(audio), dict(config)))
+            def transcribe(self, request: BackendRequest) -> BackendResult:
+                self.calls.append((len(request.audio), dict(request.options)))
                 index = len(self.calls)
-                segment = mock.Mock(start=0.0, end=0.5, text=f"chunk {index}")
-                return [segment], mock.Mock(duration=len(audio) / 16_000, duration_after_vad=0.5)
+                return BackendResult(
+                    segments=[BackendSegment(start=0.0, end=0.5, text=f"chunk {index}")],
+                    duration=len(request.audio) / 16_000,
+                    duration_after_vad=0.5,
+                    language="ja",
+                    backend="fake",
+                )
 
-        model = FakeModel()
+        model = FakeBackend()
         task = mock.Mock(audio_path="audio.mp3")
 
         with mock.patch.object(infer_module, "decode_audio", return_value=[0.0] * 80_000):
@@ -357,6 +381,47 @@ class SmartSplitTests(unittest.TestCase):
         self.assertEqual(info.duration_after_vad, 0)
         model.transcribe.assert_not_called()
         self.assertTrue(any("No speech detected" in message for message in logs.output))
+
+    def test_mlx_smart_chunks_use_outer_vad_clips_and_skip_silent_chunks(self) -> None:
+        inference = Inference.__new__(Inference)
+        inference.backend_name = "mlx"
+        inference.generation_config = {
+            "language": "ja",
+            "task": "translate",
+            "vad_filter": True,
+        }
+        inference.smart_split_options = infer_module.SmartSplitOptions(enabled=True, target_chunk_duration_s=2.0)
+        inference.vad_manager = mock.Mock()
+        inference.vad_manager.get_speech_timestamps.return_value = [
+            {"start": 0, "end": 16_000},
+            {"start": 48_000, "end": 64_000},
+        ]
+
+        class FakeBackend:
+            def __init__(self) -> None:
+                self.calls: list[BackendRequest] = []
+
+            def transcribe(self, request: BackendRequest) -> BackendResult:
+                self.calls.append(request)
+                return BackendResult(
+                    segments=[BackendSegment(start=0.0, end=0.5, text="chunk")],
+                    duration=len(request.audio) / 16_000,
+                    duration_after_vad=None,
+                    language="ja",
+                    backend="mlx",
+                )
+
+        backend = FakeBackend()
+        task = mock.Mock(audio_path="audio.mp3")
+
+        with mock.patch.object(infer_module, "decode_audio", return_value=[0.0] * 80_000):
+            segments, result = inference._transcribe_smart_chunks(backend, task)
+
+        self.assertEqual(len(backend.calls), 2)
+        self.assertEqual(backend.calls[0].options["clip_timestamps"], [0.0, 1.0])
+        self.assertEqual(backend.calls[1].options["clip_timestamps"], [1.0, 2.0])
+        self.assertEqual(result.metrics["chunk_count"], 2.0)
+        self.assertEqual([segment.start for segment in segments], [0, 2_000])
 
 
 if __name__ == "__main__":

@@ -6,6 +6,8 @@
 
   "args": {
     "model_path": "Path to the Whisper model",
+    "backend": "Inference backend: auto, ct2, or mlx",
+    "model_variant": "Backend model variant (for example, fp16)",
     "device": "Device to run the model on (cpu, cuda, auto)",
     "compute_type": "Compute type for the model",
     "overwrite": "Overwrite existing subtitle files",
@@ -43,7 +45,11 @@
     "platform": "Platform: {platform}",
     "arguments": "Arguments: {args}",
     "auto_detected_device": "Auto-detected device: {device}",
-    "auto_selected_compute_type": "Auto-selected compute type '{compute_type}' for device '{device}'"
+    "auto_selected_compute_type": "Auto-selected compute type '{compute_type}' for device '{device}'",
+    "backend_selected": "Selected backend: {backend}; profile: {profile}; model: {model}",
+    "backend_metrics": "Backend metrics: {metrics}",
+    "stage_timing": "Stage timing: {stage} = {seconds:0.3f}s",
+    "file_timing": "File total: {total:0.3f}s; subtitle post-processing: {postprocess:0.3f}s; write: {write:0.3f}s"
   },
 
   "tasks": {
@@ -77,7 +83,9 @@
     "using_default_vad": "Using default VAD configuration",
     "vad_file_not_found": "VAD metadata file not found at {path}",
     "compute_types_unavailable": "Could not get supported compute types for {device}: {error}",
-    "no_preferred_compute_type": "No preferred compute type found, using default '{default}'"
+    "no_preferred_compute_type": "No preferred compute type found, using default '{default}'",
+    "backend_auto_fallback": "Auto backend preflight selected {backend} instead: {reason}",
+    "backend_options_ignored": "The {backend} backend ignored incompatible legacy options: {options}"
   },
 
   "progress": {

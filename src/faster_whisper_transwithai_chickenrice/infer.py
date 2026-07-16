@@ -11,11 +11,11 @@ import os
 import platform
 import subprocess
 import sys
+import time
 import traceback
 from collections import ChainMap
 from dataclasses import dataclass
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import pyjson5
@@ -26,12 +26,9 @@ _FASTER_WHISPER_IMPORT_ERROR = None
 _CTRANSLATE2_IMPORT_ERROR = None
 
 try:
-    from faster_whisper import BatchedInferencePipeline, WhisperModel
     from faster_whisper.audio import decode_audio
 except Exception as e:
     _FASTER_WHISPER_IMPORT_ERROR = e
-    WhisperModel = None
-    BatchedInferencePipeline = None
     decode_audio = None
 
 try:
@@ -44,10 +41,15 @@ except Exception as e:
 # Import modern i18n module for translations
 from . import i18n_modern as i18n
 from . import inject_vad, uninject_vad
+from .backends.base import BackendRequest, BackendResult, BackendSegment, WhisperBackend
+from .backends.factory import BackendSelection, create_backend, select_backend
+from .profiles import ProfileDefinition, get_profile
 from .runtime_assets import (
     DEFAULT_MODELS_ROOT,
+    AssetIssue,
     validate_ct2_model,
     validate_feature_extractor,
+    validate_mlx_model,
     validate_vad_assets,
 )
 from .vad_manager import VadConfig, VadModelManager
@@ -84,18 +86,31 @@ def _require_ctranslate2():
     return ctranslate2
 
 
-def _require_faster_whisper():
-    if WhisperModel is None or BatchedInferencePipeline is None or decode_audio is None:
+def _require_audio_decoder():
+    if decode_audio is None:
         raise RuntimeError(
-            f"Failed to import faster_whisper. This build may be missing required runtime libraries. "
+            "Failed to import faster_whisper.audio. This build is missing the shared audio decoder. "
             f"Original error: {_FASTER_WHISPER_IMPORT_ERROR}"
         )
-    return WhisperModel, BatchedInferencePipeline
+    return decode_audio
 
 
 def parse_arguments():
     parser = argparse.ArgumentParser(description=_("app.description"))
-    parser.add_argument("--model_name_or_path", type=str, default="models", help=_("args.model_path"))
+    parser.add_argument("--model_name_or_path", type=str, default=None, help=_("args.model_path"))
+    parser.add_argument(
+        "--backend",
+        choices=("auto", "ct2", "mlx"),
+        default="auto",
+        help=_("args.backend"),
+    )
+    parser.add_argument(
+        "--model-variant",
+        "--model_variant",
+        dest="model_variant",
+        default=None,
+        help=_("args.model_variant"),
+    )
     parser.add_argument("--device", type=str, default="auto", help=_("args.device"))
     parser.add_argument("--compute_type", type=str, default="auto", help=_("args.compute_type"))
     parser.add_argument(
@@ -165,7 +180,7 @@ def parse_arguments():
         "--smart_split_with_vad",
         type=str,
         default=None,
-        help="Enable smart outer VAD chunking before faster-whisper internal VAD (true/false)",
+        help="Enable smart outer VAD chunking before backend inference (true/false)",
     )
     parser.add_argument(
         "--target_chunk_duration_s",
@@ -201,7 +216,7 @@ def parse_arguments():
     parser.add_argument(
         "--enable_batching",
         action="store_true",
-        help="Enable batched inference for faster processing (requires more VRAM)",
+        help="Enable CT2 batched inference for faster processing (requires more memory)",
     )
     parser.add_argument(
         "--batch_size",
@@ -290,10 +305,22 @@ def select_best_compute_type(device: str) -> str:
     return default
 
 
-def require_local_runtime_assets(model_path: Path) -> None:
+def require_local_runtime_assets(
+    model_path: Path,
+    *,
+    backend: str = "ct2",
+    validate_model: bool = True,
+) -> None:
     """Fail before inference if any local-only runtime asset is incomplete."""
     issues = []
-    _checked, model_issues = validate_ct2_model(model_path)
+    model_issues: list[AssetIssue] = []
+    if validate_model:
+        if backend == "ct2":
+            _checked, model_issues = validate_ct2_model(model_path)
+        elif backend == "mlx":
+            _checked, model_issues = validate_mlx_model(model_path)
+        else:
+            raise ValueError(f"Unsupported backend: {backend}")
     _checked, vad_issues, _providers = validate_vad_assets(DEFAULT_MODELS_ROOT)
     _checked, feature_issues = validate_feature_extractor(DEFAULT_MODELS_ROOT)
     issues.extend(model_issues)
@@ -608,18 +635,27 @@ class Inference:
 
     def __init__(self, args):
         self.args = args
-        self.model_name_or_path = str(Path(args.model_name_or_path).expanduser().resolve())
+        model_path = getattr(args, "model_name_or_path", None)
+        self.model_name_or_path = str(Path(model_path).expanduser().resolve()) if model_path else None
+        self.requested_backend = (getattr(args, "backend", "auto") or "auto").strip().lower()
+        self.model_variant = getattr(args, "model_variant", None)
+        self.backend_selection: BackendSelection | None = None
+        self.backend_name: str | None = None
+        self.profile: ProfileDefinition | None = None
         self.vad_injected = False
         self.vad_manager = None
         self._runtime_ready = False
+        self._warned_backend_options: set[str] = set()
         self.requested_device = (args.device or "auto").strip().lower()
-        self.device = resolve_device(self.requested_device)
+        self.device = "gpu" if self.requested_backend == "mlx" else resolve_device(self.requested_device)
         self.cpu_threads = args.cpu_threads
         self.vad_threads = args.vad_threads
         if self.cpu_threads < 0 or self.vad_threads < 0:
             raise ValueError("cpu_threads and vad_threads must be non-negative")
         # Auto-select compute type if 'auto' or 'default' is specified
-        if args.compute_type in ["auto", "default"]:
+        if self.requested_backend == "mlx":
+            self.compute_type = "float16"
+        elif args.compute_type in ["auto", "default"]:
             self.compute_type = select_best_compute_type(self.device)
         else:
             self.compute_type = args.compute_type
@@ -646,6 +682,7 @@ class Inference:
         self.generation_config, self.segment_merge_options, self.smart_split_options = self._load_generation_config(
             args
         )
+        self.profile = get_profile(self.generation_config["task"])
 
         logger.info(_("info.generation_config", config=self.generation_config))
         logger.info(
@@ -663,11 +700,36 @@ class Inference:
     def _ensure_runtime_ready(self) -> None:
         if self._runtime_ready:
             return
+        if self.profile is None:
+            raise RuntimeError("Inference profile was not initialized")
+        started = time.perf_counter()
         os.environ.setdefault("HF_HUB_OFFLINE", "1")
         os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
-        require_local_runtime_assets(Path(self.model_name_or_path))
+        self.backend_selection = select_backend(
+            self.requested_backend,
+            self.profile,
+            variant=self.model_variant,
+            model_path=self.model_name_or_path,
+        )
+        self.backend_name = self.backend_selection.selected
+        self.model_name_or_path = str(self.backend_selection.descriptor.path)
+        if self.backend_name == "ct2":
+            self.device = resolve_device(self.requested_device)
+            if self.args.compute_type in ["auto", "default"]:
+                self.compute_type = select_best_compute_type(self.device)
+            else:
+                self.compute_type = self.args.compute_type
+        else:
+            self.device = "gpu"
+            self.compute_type = "float16"
+        require_local_runtime_assets(
+            Path(self.model_name_or_path),
+            backend=self.backend_name,
+            validate_model=False,
+        )
         self._setup_vad_injection(self.args)
         self._runtime_ready = True
+        logger.info(_("info.stage_timing", stage="runtime_preflight", seconds=time.perf_counter() - started))
 
     def _load_generation_config(self, args) -> tuple[dict[str, Any], SegmentMergeOptions, SmartSplitOptions]:
         """Load and process generation configuration"""
@@ -676,6 +738,9 @@ class Inference:
             "language": "ja",
             "task": "translate",
             "vad_filter": True,
+            "beam_size": 1,
+            "condition_on_previous_text": False,
+            "word_timestamps": False,
         }
 
         segment_merge_options = SegmentMergeOptions()
@@ -865,21 +930,25 @@ class Inference:
             vad_config.frame_duration_ms = 20
             vad_config.chunk_duration_ms = 30000
 
-        vad_config.force_cpu = self.device == "cpu"
+        # VAD remains CPU-only for every Whisper backend.
+        vad_config.force_cpu = True
         vad_config.num_threads = self.vad_threads
 
-        # Inject VAD with progress callback
+        # The manager is shared by both backends. Faster-Whisper additionally
+        # receives the injection so its optional inner VAD keeps existing CT2
+        # behavior; MLX consumes only the outer VAD/chunk plan.
         self.vad_manager = VadModelManager(
             config=vad_config,
             ttl=vad_config.ttl,
             progress_callback=self._vad_progress_callback,
         )
-        inject_vad(
-            model_id=vad_model,
-            config=vad_config,
-            progress_callback=self._vad_progress_callback,
-        )
-        self.vad_injected = True
+        if self.backend_name == "ct2":
+            inject_vad(
+                model_id=vad_model,
+                config=vad_config,
+                progress_callback=self._vad_progress_callback,
+            )
+            self.vad_injected = True
         logger.info(_("info.vad_activated", threshold=vad_config.threshold))
 
     def _prepare_transcription(self, audio_path: str, *, batched: bool) -> tuple[Any, dict[str, Any], float | None]:
@@ -891,14 +960,18 @@ class Inference:
         if self.vad_manager is None:
             return audio_path, config, None
 
-        audio = decode_audio(audio_path, sampling_rate=WHISPER_SAMPLING_RATE)
+        decode_started = time.perf_counter()
+        audio = _require_audio_decoder()(audio_path, sampling_rate=WHISPER_SAMPLING_RATE)
+        logger.info(_("info.stage_timing", stage="audio_decode", seconds=time.perf_counter() - decode_started))
         vad_parameters = config.get("vad_parameters") or {}
+        vad_started = time.perf_counter()
         vad_segments = self.vad_manager.get_speech_timestamps(
             model_id="whisper_vad",
             audio=audio,
             sampling_rate=WHISPER_SAMPLING_RATE,
             **vad_parameters,
         )
+        logger.info(_("info.stage_timing", stage="outer_vad", seconds=time.perf_counter() - vad_started))
         duration_after_vad = sum(segment["end"] - segment["start"] for segment in vad_segments) / WHISPER_SAMPLING_RATE
 
         config["vad_filter"] = False
@@ -912,25 +985,33 @@ class Inference:
 
         return audio, config, duration_after_vad
 
-    def _plan_smart_chunks(self, audio_path: str) -> tuple[Any, list[AudioChunk], float | None]:
-        audio = decode_audio(audio_path, sampling_rate=WHISPER_SAMPLING_RATE)
+    def _plan_smart_chunks(
+        self,
+        audio_path: str,
+    ) -> tuple[Any, list[AudioChunk], float | None, list[SpeechSpan]]:
+        decode_started = time.perf_counter()
+        audio = _require_audio_decoder()(audio_path, sampling_rate=WHISPER_SAMPLING_RATE)
+        logger.info(_("info.stage_timing", stage="audio_decode", seconds=time.perf_counter() - decode_started))
         duration = len(audio) / WHISPER_SAMPLING_RATE
 
         if not self.smart_split_options.enabled or not self.generation_config.get("vad_filter"):
-            return audio, [AudioChunk(0, 0.0, duration)], None
+            return audio, [AudioChunk(0, 0.0, duration)], None, []
 
         if self.vad_manager is None:
-            return audio, [AudioChunk(0, 0.0, duration)], None
+            return audio, [AudioChunk(0, 0.0, duration)], None, []
 
         vad_parameters = self.generation_config.get("vad_parameters") or {}
+        vad_started = time.perf_counter()
         vad_segments = self.vad_manager.get_speech_timestamps(
             model_id="whisper_vad",
             audio=audio,
             sampling_rate=WHISPER_SAMPLING_RATE,
             **vad_parameters,
         )
+        logger.info(_("info.stage_timing", stage="outer_vad", seconds=time.perf_counter() - vad_started))
         duration_after_vad = sum(segment["end"] - segment["start"] for segment in vad_segments) / WHISPER_SAMPLING_RATE
 
+        split_started = time.perf_counter()
         spans = vad_segments_to_speech_spans(vad_segments, WHISPER_SAMPLING_RATE)
         chunks = create_contiguous_chunks(
             spans,
@@ -940,15 +1021,63 @@ class Inference:
         )
         if not chunks:
             chunks = [AudioChunk(0, 0.0, duration)]
+        logger.info(_("info.stage_timing", stage="chunk_planning", seconds=time.perf_counter() - split_started))
         logger.info("Smart VAD split planned %s chunk(s)", len(chunks))
 
-        return audio, chunks, duration_after_vad
+        return audio, chunks, duration_after_vad, spans
 
-    def _transcribe_standard(self, model, audio_input, transcription_config):
-        return model.transcribe(audio_input, **transcription_config)
+    def _backend_request(self, audio: Any, config: dict[str, Any]) -> BackendRequest:
+        profile = getattr(self, "profile", None)
+        return BackendRequest(
+            audio=audio,
+            language=str(config.get("language", profile.language if profile else "ja")),
+            task=str(config.get("task", profile.task if profile else "translate")),
+            options=config,
+        )
 
-    def _transcribe_smart_chunks(self, model, task: InferenceTask) -> tuple[list[Segment], Any]:
-        audio, chunks, outer_duration_after_vad = self._plan_smart_chunks(task.audio_path)
+    @staticmethod
+    def _convert_backend_segments(
+        backend_segments: list[BackendSegment],
+        *,
+        offset_ms: int = 0,
+        limit_ms: int | None = None,
+    ) -> list[Segment]:
+        segments: list[Segment] = []
+        for backend_segment in backend_segments:
+            segment = Segment(
+                start=offset_ms + int(round(backend_segment.start * 1_000)),
+                end=offset_ms + int(round(backend_segment.end * 1_000)),
+                text=backend_segment.text.strip(),
+            )
+            if limit_ms is not None:
+                if segment.start >= limit_ms:
+                    continue
+                segment = Segment(segment.start, min(segment.end, limit_ms), segment.text)
+            if segment.text and segment.end > segment.start:
+                segments.append(segment)
+        return segments
+
+    def _warn_ignored_backend_options(self, backend: WhisperBackend) -> None:
+        warned: set[str] = set(getattr(self, "_warned_backend_options", set()))
+        ignored = set(getattr(backend, "ignored_options", ())).difference(warned)
+        if not ignored:
+            return
+        warned.update(ignored)
+        self._warned_backend_options = warned
+        logger.warning(
+            _(
+                "warnings.backend_options_ignored",
+                backend=getattr(self, "backend_name", None),
+                options=", ".join(sorted(ignored)),
+            )
+        )
+
+    def _transcribe_smart_chunks(
+        self,
+        backend: WhisperBackend,
+        task: InferenceTask,
+    ) -> tuple[list[Segment], BackendResult]:
+        audio, chunks, outer_duration_after_vad, speech_spans = self._plan_smart_chunks(task.audio_path)
         duration = len(audio) / WHISPER_SAMPLING_RATE
         config = dict(self.generation_config)
         config.pop("clip_timestamps", None)
@@ -958,11 +1087,20 @@ class Inference:
 
         if outer_duration_after_vad == 0:
             logger.info(_("info.no_speech_detected", path=task.audio_path))
-            return [], SimpleNamespace(duration=duration, duration_after_vad=0)
+            return [], BackendResult(
+                segments=[],
+                duration=duration,
+                duration_after_vad=0,
+                language=config.get("language"),
+                backend=getattr(self, "backend_name", None) or "unknown",
+                metrics={"chunk_count": 0.0},
+            )
 
         segments: list[Segment] = []
+        normalized_backend_segments: list[BackendSegment] = []
         inner_duration_after_vad = 0.0
         has_inner_duration = False
+        metrics: dict[str, float] = {"chunk_count": 0.0}
 
         for chunk in chunks:
             start_sample = max(0, min(len(audio), int(round(chunk.start * WHISPER_SAMPLING_RATE))))
@@ -970,6 +1108,23 @@ class Inference:
             if end_sample <= start_sample:
                 continue
             chunk_audio = audio[start_sample:end_sample]
+            chunk_config = dict(config)
+            if getattr(self, "backend_name", None) == "mlx" and speech_spans:
+                clip_timestamps: list[float] = []
+                for span in speech_spans:
+                    overlap_start = max(chunk.start, span.start)
+                    overlap_end = min(chunk.end, span.end)
+                    if overlap_end > overlap_start:
+                        clip_timestamps.extend(
+                            [
+                                max(0.0, overlap_start - chunk.start),
+                                max(0.0, overlap_end - chunk.start),
+                            ]
+                        )
+                if not clip_timestamps:
+                    logger.debug("Skipping MLX chunk %s with no outer-VAD speech", chunk.index + 1)
+                    continue
+                chunk_config["clip_timestamps"] = clip_timestamps
             logger.debug(
                 "Smart VAD chunk %s/%s: %s --> %s",
                 chunk.index + 1,
@@ -977,33 +1132,50 @@ class Inference:
                 SubWriter.srt_timestamp(int(round(chunk.start * 1_000))),
                 SubWriter.srt_timestamp(int(round(chunk.end * 1_000))),
             )
-            chunk_segments_iter, chunk_info = model.transcribe(chunk_audio, **config)
-            if hasattr(chunk_info, "duration_after_vad"):
-                inner_duration_after_vad += float(chunk_info.duration_after_vad)
+            metrics["chunk_count"] += 1.0
+            chunk_result = backend.transcribe(self._backend_request(chunk_audio, chunk_config))
+            self._warn_ignored_backend_options(backend)
+            if chunk_result.duration_after_vad is not None:
+                inner_duration_after_vad += chunk_result.duration_after_vad
                 has_inner_duration = True
+            for name, value in chunk_result.metrics.items():
+                if name in {"batch_size", "ignored_option_count", "peak_memory_bytes"}:
+                    metrics[name] = max(metrics.get(name, 0.0), value)
+                else:
+                    metrics[name] = metrics.get(name, 0.0) + value
             chunk_offset_ms = int(round(chunk.start * 1_000))
             chunk_end_ms = int(round(chunk.end * 1_000))
-            for _segment in chunk_segments_iter:
-                segment = Segment(
-                    start=chunk_offset_ms + int(round(_segment.start * 1_000)),
-                    end=chunk_offset_ms + int(round(_segment.end * 1_000)),
-                    text=_segment.text.strip(),
-                )
-                if segment.start >= chunk_end_ms:
-                    continue
-                segment = Segment(segment.start, min(segment.end, chunk_end_ms), segment.text)
-                if segment.end > segment.start:
-                    segments.append(segment)
-                    logger.debug(
-                        f"[{SubWriter.lrc_timestamp(segment.start)} --> "
-                        f"{SubWriter.lrc_timestamp(segment.end)}] {segment.text}"
+            converted = self._convert_backend_segments(
+                chunk_result.segments,
+                offset_ms=chunk_offset_ms,
+                limit_ms=chunk_end_ms,
+            )
+            segments.extend(converted)
+            for segment in converted:
+                normalized_backend_segments.append(
+                    BackendSegment(
+                        start=segment.start / 1_000,
+                        end=segment.end / 1_000,
+                        text=segment.text,
                     )
+                )
+                logger.debug(
+                    f"[{SubWriter.lrc_timestamp(segment.start)} --> "
+                    f"{SubWriter.lrc_timestamp(segment.end)}] {segment.text}"
+                )
 
         duration_after_vad = inner_duration_after_vad if has_inner_duration else outer_duration_after_vad
-        return segments, SimpleNamespace(duration=duration, duration_after_vad=duration_after_vad)
+        return segments, BackendResult(
+            segments=normalized_backend_segments,
+            duration=duration,
+            duration_after_vad=duration_after_vad,
+            language=config.get("language"),
+            backend=getattr(self, "backend_name", None) or "unknown",
+            metrics=metrics,
+        )
 
     def _log_duration(self, duration: float, duration_after_vad: float) -> None:
-        if duration == duration_after_vad or duration_after_vad == 0:
+        if duration <= 0 or duration == duration_after_vad or duration_after_vad == 0:
             logger.info(_("info.duration", duration=format_duration(duration)))
             return
 
@@ -1025,7 +1197,9 @@ class Inference:
             logger.warning(_("warnings.provide_directories"))
             return EXIT_NO_INPUT
 
+        scan_started = time.perf_counter()
         tasks = self._scan(base_dirs)
+        logger.info(_("info.stage_timing", stage="file_scan", seconds=time.perf_counter() - scan_started))
         if len(tasks) == 0:
             logger.info(_("info.no_files_found"))
             return EXIT_OK if self.last_scan_supported_count > 0 else EXIT_NO_INPUT
@@ -1035,42 +1209,39 @@ class Inference:
         logger.info(_("tasks.processing", count=len(tasks), task=self.generation_config["task"]))
         logger.info(_("info.loading_whisper"))
 
+        backend: WhisperBackend | None = None
         try:
-            _WhisperModelCls, BatchedInferencePipelineCls = _require_faster_whisper()
-
-            model = self._create_whisper_model()
+            if self.backend_selection is None:
+                raise RuntimeError("Backend selection was not initialized")
+            backend = create_backend(
+                self.backend_selection,
+                device=self.device,
+                compute_type=self.compute_type,
+                cpu_threads=self.cpu_threads,
+                enable_batching=self.enable_batching,
+                batch_size=self.batch_size,
+                max_batch_size=self.max_batch_size,
+            )
+            if self.backend_selection.fallback_reason:
+                logger.warning(
+                    _(
+                        "warnings.backend_auto_fallback",
+                        backend=self.backend_selection.selected,
+                        reason=self.backend_selection.fallback_reason,
+                    )
+                )
+            logger.info(
+                _(
+                    "info.backend_selected",
+                    backend=self.backend_selection.selected,
+                    profile=self.profile.name if self.profile else self.generation_config["task"],
+                    model=self.backend_selection.descriptor.path,
+                )
+            )
             logger.info(_("info.model_precision").format(precision=self.compute_type, device=self.device))
 
-            # Setup batched inference if enabled
-            batched_model = None
-            batch_size_to_use = self.batch_size
-
-            if self.enable_batching:
-                try:
-                    batched_model = BatchedInferencePipelineCls(model=model)
-
-                    # Auto-detect batch size if not specified
-                    if batch_size_to_use == 0 and len(tasks) > 0:
-                        # Use the first audio file as sample for testing
-                        batch_size_to_use = self._find_executable_batch_size(
-                            model,
-                            tasks[0].audio_path,
-                            min_batch_size=1,
-                            max_batch_size=self.max_batch_size,
-                        )
-
-                        if batch_size_to_use == 0:
-                            logger.warning("Could not find suitable batch size. Falling back to non-batched mode.")
-                            batched_model = None
-
-                    if batched_model and batch_size_to_use > 0:
-                        logger.info(f"Using batched inference with batch size: {batch_size_to_use}")
-
-                except Exception as e:
-                    logger.warning(f"Failed to setup batched inference: {str(e)}. Falling back to non-batched mode.")
-                    batched_model = None
-
             for i, task in enumerate(tasks):
+                file_started = time.perf_counter()
                 logger.info(
                     _(
                         "info.processing",
@@ -1082,253 +1253,77 @@ class Inference:
                 )
 
                 if self._should_use_smart_split():
-                    segments, info = self._transcribe_smart_chunks(model, task)
-                    duration_after_vad = info.duration_after_vad
+                    segments, result = self._transcribe_smart_chunks(backend, task)
                 else:
                     audio_input, transcription_config, manual_duration_after_vad = self._prepare_transcription(
                         task.audio_path,
-                        batched=bool(batched_model and batch_size_to_use > 0),
+                        batched=bool(getattr(backend, "batching_enabled", False)),
                     )
-
-                    # Use batched or regular inference
-                    if batched_model and batch_size_to_use > 0:
-                        # Use auto-retry with batch size reduction on OOM
-                        # This mimics HuggingFace Accelerate's find_executable_batch_size behavior
-                        try:
-                            _segments, info, actual_batch_size = self._transcribe_with_auto_batch_size(
-                                batched_model,
-                                audio_input,
-                                transcription_config,
-                                starting_batch_size=batch_size_to_use,
-                            )
-                            # Update batch_size_to_use if it was auto-adjusted
-                            if actual_batch_size < batch_size_to_use:
-                                logger.info(f"Batch size auto-adjusted from {batch_size_to_use} to {actual_batch_size}")
-                                batch_size_to_use = actual_batch_size
-                        except Exception as e:
-                            logger.warning(f"Batched inference failed: {str(e)}. Falling back to non-batched mode.")
-                            # Fallback to non-batched
-                            audio_input, transcription_config, manual_duration_after_vad = self._prepare_transcription(
-                                task.audio_path,
-                                batched=False,
-                            )
-                            _segments, info = model.transcribe(
-                                audio_input,
-                                **transcription_config,
-                            )
-                    else:
-                        if manual_duration_after_vad == 0:
-                            logger.info(_("info.no_speech_detected", path=task.audio_path))
-                            _segments = []
-                            info = SimpleNamespace(
-                                duration=len(audio_input) / WHISPER_SAMPLING_RATE,
-                                duration_after_vad=0,
-                            )
-                        else:
-                            _segments, info = model.transcribe(
-                                audio_input,
-                                **transcription_config,
-                            )
-
-                    duration_after_vad = (
-                        manual_duration_after_vad if manual_duration_after_vad is not None else info.duration_after_vad
-                    )
-
-                    segments = []
-                    for _segment in _segments:
-                        segment = Segment(
-                            start=int(_segment.start * 1_000),
-                            end=int(_segment.end * 1_000),
-                            text=_segment.text.strip(),
+                    if manual_duration_after_vad == 0:
+                        logger.info(_("info.no_speech_detected", path=task.audio_path))
+                        duration = len(audio_input) / WHISPER_SAMPLING_RATE if not isinstance(audio_input, str) else 0.0
+                        result = BackendResult(
+                            segments=[],
+                            duration=duration,
+                            duration_after_vad=0,
+                            language=transcription_config.get("language"),
+                            backend=self.backend_name or "unknown",
                         )
-                        segments.append(segment)
+                    else:
+                        result = backend.transcribe(self._backend_request(audio_input, transcription_config))
+                        self._warn_ignored_backend_options(backend)
+                    if manual_duration_after_vad is not None:
+                        result = BackendResult(
+                            segments=result.segments,
+                            duration=result.duration,
+                            duration_after_vad=manual_duration_after_vad,
+                            language=result.language,
+                            backend=result.backend,
+                            metrics=result.metrics,
+                        )
+                    segments = self._convert_backend_segments(result.segments)
+                    for segment in segments:
                         logger.debug(
                             f"[{SubWriter.lrc_timestamp(segment.start)} --> "
                             f"{SubWriter.lrc_timestamp(segment.end)}] {segment.text}"
                         )
 
-                self._log_duration(info.duration, duration_after_vad)
+                duration_after_vad = (
+                    result.duration_after_vad if result.duration_after_vad is not None else result.duration
+                )
+                self._log_duration(result.duration, duration_after_vad)
+                if result.metrics:
+                    logger.info(_("info.backend_metrics", metrics=result.metrics))
 
+                postprocess_started = time.perf_counter()
                 segments = enforce_segment_timeline(segments, self.segment_merge_options.max_duration_ms)
                 segments = merge_segments(segments, self.segment_merge_options)
                 segments = enforce_segment_timeline(segments, self.segment_merge_options.max_duration_ms)
+                postprocess_seconds = time.perf_counter() - postprocess_started
                 os.makedirs(os.path.dirname(task.sub_prefix), exist_ok=True)
+                write_started = time.perf_counter()
                 for sub_suffix in task.sub_formats:
                     sub_path = f"{task.sub_prefix}.{sub_suffix}"
                     logger.info(_("info.writing", path=sub_path))
                     self.sub_writers[sub_suffix](segments, sub_path)
+                write_seconds = time.perf_counter() - write_started
+                logger.info(
+                    _(
+                        "info.file_timing",
+                        total=time.perf_counter() - file_started,
+                        postprocess=postprocess_seconds,
+                        write=write_seconds,
+                    )
+                )
 
         finally:
+            if backend is not None:
+                backend.close()
             # Clean up VAD injection
             if self.vad_injected:
                 uninject_vad()
                 logger.info(_("info.vad_deactivated"))
         return EXIT_OK
-
-    def _create_whisper_model(self):
-        WhisperModelCls = _require_faster_whisper()[0]
-        return WhisperModelCls(
-            self.model_name_or_path,
-            device=self.device,
-            compute_type=self.compute_type,
-            cpu_threads=self.cpu_threads,
-        )
-
-    def _find_executable_batch_size(self, model, sample_audio_path, min_batch_size=1, max_batch_size=64):
-        """
-        Find the maximum executable batch size for batched inference.
-        Starts from max_batch_size and works down exponentially on OOM.
-
-        Args:
-            model: WhisperModel instance
-            sample_audio_path: Path to a sample audio file for testing
-            min_batch_size: Minimum batch size to try
-            max_batch_size: Maximum batch size to try
-
-        Returns:
-            Optimal batch size that fits in memory
-        """
-        if not self.enable_batching:
-            return 0
-
-        BatchedInferencePipelineCls = _require_faster_whisper()[1]
-
-        logger.info(_("batch.finding_optimal", min_size=min_batch_size, max_size=max_batch_size))
-
-        # Start from max and work down on failure (like HuggingFace Accelerate)
-        current_batch_size = max_batch_size
-
-        while current_batch_size >= min_batch_size:
-            try:
-                logger.info(_("batch.testing_size", size=current_batch_size))
-
-                # Try to create batched pipeline with this batch size
-                batched_model = BatchedInferencePipelineCls(model=model)
-
-                # Test transcription with this batch size
-                # Note: batch_size is passed separately to BatchedInferencePipeline.transcribe()
-                # It's NOT part of generation_config
-                segments, info = batched_model.transcribe(
-                    sample_audio_path,
-                    batch_size=current_batch_size,  # batch_size is a separate parameter
-                    **self.generation_config,  # generation_config doesn't include batch_size
-                )
-
-                # Force evaluation by converting to list
-                list(segments)
-
-                # Success! This batch size works
-                logger.info(_("batch.size_successful", size=current_batch_size))
-                logger.info(_("batch.optimal_found", size=current_batch_size))
-                return current_batch_size
-
-            except RuntimeError as e:
-                # If OOM, reduce batch size exponentially
-                error_msg = str(e)
-                if "out of memory" in error_msg.lower() or "oom" in error_msg.lower():
-                    logger.warning(_("batch.oom_error", size=current_batch_size))
-                else:
-                    logger.warning(
-                        _(
-                            "batch.runtime_error",
-                            size=current_batch_size,
-                            error=error_msg,
-                        )
-                    )
-
-                # Reduce batch size by half (exponential backoff)
-                new_batch_size = current_batch_size // 2
-
-                # Ensure we reduce by at least 1
-                if new_batch_size == current_batch_size:
-                    new_batch_size = current_batch_size - 1
-
-                if new_batch_size < min_batch_size:
-                    logger.error(_("batch.no_suitable_size", min_size=min_batch_size))
-                    return 0
-
-                logger.info(
-                    _(
-                        "batch.reducing_size",
-                        old_size=current_batch_size,
-                        new_size=new_batch_size,
-                    )
-                )
-                current_batch_size = new_batch_size
-
-            except Exception as e:
-                logger.warning(_("batch.unexpected_error", size=current_batch_size, error=str(e)))
-
-                # Reduce batch size by half on unexpected errors too
-                new_batch_size = current_batch_size // 2
-                if new_batch_size < min_batch_size:
-                    return 0
-                current_batch_size = new_batch_size
-
-        # Should not reach here
-        logger.error(_("batch.no_suitable_size", min_size=min_batch_size))
-        return 0
-
-    def _transcribe_with_auto_batch_size(self, batched_model, audio_path, generation_config, starting_batch_size=None):
-        """
-        Transcribe with automatic batch size reduction on OOM.
-        Similar to HuggingFace Accelerate's find_executable_batch_size decorator.
-
-        This function automatically retries with smaller batch sizes if OOM occurs,
-        implementing the same behavior as Accelerate's find_executable_batch_size.
-
-        Args:
-            batched_model: BatchedInferencePipeline instance
-            audio_path: Path to audio file
-            starting_batch_size: Initial batch size to try (uses self.batch_size if not specified)
-
-        Returns:
-            Tuple of (segments, info, actual_batch_size_used)
-        """
-        batch_size = starting_batch_size or self.batch_size or 32
-        min_batch_size = 1
-
-        while batch_size >= min_batch_size:
-            try:
-                logger.debug(_("batch.attempting_transcription", size=batch_size))
-
-                # Try transcription with current batch size
-                segments, info = batched_model.transcribe(audio_path, batch_size=batch_size, **generation_config)
-
-                # Success! Return results with the batch size that worked
-                if batch_size < (starting_batch_size or self.batch_size or 32):
-                    logger.info(_("batch.auto_adjusted", size=batch_size))
-
-                return segments, info, batch_size
-
-            except RuntimeError as e:
-                if "out of memory" in str(e).lower() or "oom" in str(e).lower():
-                    # Reduce batch size by 0.8 (20% reduction, similar to Accelerate's 0.9 but more aggressive)
-                    new_batch_size = int(batch_size * 0.8)
-
-                    # Ensure we reduce by at least 1
-                    if new_batch_size == batch_size:
-                        new_batch_size = batch_size - 1
-
-                    logger.warning(
-                        _(
-                            "batch.oom_reducing",
-                            old_size=batch_size,
-                            new_size=new_batch_size,
-                        )
-                    )
-
-                    batch_size = new_batch_size
-
-                    if batch_size < min_batch_size:
-                        logger.error(_("batch.cannot_run_min", min_size=min_batch_size))
-                        raise RuntimeError(_("batch.inference_failed", min_size=min_batch_size)) from e
-                else:
-                    # Not an OOM error, re-raise
-                    raise
-
-        # Should not reach here
-        raise RuntimeError("Failed to find executable batch size")
 
     def _scan(self, base_dirs) -> list[InferenceTask]:
         tasks: list[InferenceTask] = []
