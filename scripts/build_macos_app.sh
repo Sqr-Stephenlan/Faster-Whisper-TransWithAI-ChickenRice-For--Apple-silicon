@@ -112,9 +112,9 @@ cat >"$PLIST" <<'PLIST'
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.1.0</string>
+    <string>1.2.0</string>
     <key>CFBundleVersion</key>
-    <string>3</string>
+    <string>4</string>
     <key>LSMinimumSystemVersion</key>
     <string>13.0</string>
     <key>NSAppleEventsUsageDescription</key>
@@ -136,4 +136,4 @@ mv "$BUILD_APP" "$APP_DIR"
 
 echo
 echo "已生成：$APP_DIR"
-echo "使用方法：双击 AI语音翻译.app，拖入音视频或文件夹，然后点击“开始翻译”。"
+echo "使用方法：双击 AI语音翻译.app，选择 CPU 或 GPU，拖入音视频或文件夹，然后开始翻译。"

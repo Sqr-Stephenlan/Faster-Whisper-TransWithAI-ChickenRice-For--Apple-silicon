@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build and run the fixed Apple Silicon CPU inference command."""
+"""Build and run explicit macOS translation or transcription commands."""
 
 from __future__ import annotations
 
