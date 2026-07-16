@@ -4,7 +4,7 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT"
 
-./dev.sh python scripts/macos_launcher.py --mode translate "$@"
+./dev.sh python scripts/macos_launcher.py --mode translate --backend ct2 "$@"
 status=$?
 if [ "$status" -ne 0 ] && [ "${TRANSWITHAI_NO_PAUSE:-0}" != "1" ] && [ -t 0 ]; then
   echo
