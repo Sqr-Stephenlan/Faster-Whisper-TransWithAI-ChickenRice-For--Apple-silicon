@@ -30,7 +30,7 @@
 ./dev.sh bootstrap
 ```
 
-CPU 运行依赖来自 `requirements-macos.txt`，并由 `constraints-macos-arm64.txt` 锁定已验证版本。MLX 的附加依赖位于 `requirements-macos-mlx.txt`，正式运行还需安装独立转换项目生成的 `mlx_whisper_runtime_local-0.4.3+runtime.1` wheel；该 wheel 不依赖 PyTorch。测试和静态检查依赖位于 `requirements-dev.txt`。
+CPU 运行依赖来自 `requirements-macos.txt`，并由 `constraints-macos-arm64.txt` 锁定已验证版本。MLX 的附加依赖位于 `requirements-macos-mlx.txt`，正式运行还需安装独立转换项目生成的 `mlx_whisper_runtime_local-0.4.3+runtime.4` wheel；该 wheel 不依赖 PyTorch。测试和静态检查依赖位于 `requirements-dev.txt`。
 
 ## 准备模型
 

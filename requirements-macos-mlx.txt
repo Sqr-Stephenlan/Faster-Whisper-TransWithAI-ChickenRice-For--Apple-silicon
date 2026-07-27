@@ -2,7 +2,7 @@
 # Install after requirements-macos.txt, then install the pinned local runtime-only wheel:
 #
 #   ./dev.sh pip install -r requirements-macos-mlx.txt
-#   ./dev.sh pip install /path/to/mlx_whisper_runtime_local-0.4.3+runtime.1-py3-none-any.whl
+#   ./dev.sh pip install /path/to/mlx_whisper_runtime_local-0.4.3+runtime.4-py3-none-any.whl
 #
 # The local wheel is intentionally not fetched from an index and does not depend on PyTorch.
 

@@ -43,6 +43,24 @@
     // Target duration for each smart split chunk (seconds), capped at 30 seconds
     "target_chunk_duration_s": 30,
 
+    // MLX 回滚开关：默认对每个有语音的 Smart VAD chunk 解完整连续音频；设为 true 才恢复旧 outer clips
+    // MLX rollback switch: decode each voiced Smart VAD chunk in full by default; true restores legacy outer clips
+    "mlx_use_outer_vad_clips": false,
+
+    // production 候选异常且不是固定 T0 时，最多增加一次 full-chunk、temperature=0.0 repair
+    // repair 仅在严格更优时替换 production；质量相同则保留 production
+    // If anomalous production is not fixed T0, allow at most one full-chunk temperature=0.0 repair
+    // Select repair only when strictly better; ties keep production
+    "mlx_safe_retry_without_clips": true,
+
+    // MLX window 诊断明细默认关闭；仅在一次性人工诊断时开启，仍受事件数和 64 KiB 上限约束
+    // MLX window diagnostics are off by default; manual debug remains bounded by event and 64 KiB limits
+    "mlx_debug_diagnostics": false,
+
+    // MLX 每次请求开始时重置固定采样 seed，保证 production 与 repair 候选可复现
+    // Reset a fixed MLX sampling seed at the start of every request for reproducible candidates
+    "mlx_sampling_seed": 0,
+
     // 字幕后处理：合并重复/重叠片段，避免字幕时间轴过长
     // Subtitle post-processing: merge repeated/overlapping segments and avoid overly long timelines
     "segment_merge": {

@@ -7,6 +7,7 @@ import argparse
 import code
 import json
 import logging
+import math
 import os
 import platform
 import subprocess
@@ -14,6 +15,7 @@ import sys
 import time
 import traceback
 from collections import ChainMap
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -43,6 +45,12 @@ from . import i18n_modern as i18n
 from . import inject_vad, uninject_vad
 from .backends.base import BackendRequest, BackendResult, BackendSegment, WhisperBackend
 from .backends.factory import BackendSelection, create_backend, select_backend
+from .mlx_diagnostics import (
+    build_mlx_diagnostic_events,
+    decide_ct2_rescue,
+    detect_high_confidence_loops,
+    serialize_mlx_diagnostic_event,
+)
 from .profiles import ProfileDefinition, get_profile
 from .runtime_assets import (
     DEFAULT_MODELS_ROOT,
@@ -62,6 +70,14 @@ format_percentage = i18n.format_percentage
 WHISPER_TASKS = ("transcribe", "translate")
 WHISPER_SAMPLING_RATE = 16_000
 MAX_SMART_CHUNK_DURATION_S = 30.0
+_CT2_TAIL_MIN_SPEECH_OVERLAP_S = 0.75
+_CT2_TAIL_MIN_SPEECH_OVERLAP_RATIO = 0.75
+MLX_PROJECT_FLAG_DEFAULTS = {
+    "mlx_use_outer_vad_clips": False,
+    "mlx_safe_retry_without_clips": True,
+    "mlx_debug_diagnostics": False,
+}
+MLX_SAMPLING_SEED_DEFAULT = 0
 EXIT_OK = 0
 EXIT_RUNTIME_ERROR = 1
 EXIT_NO_INPUT = 2
@@ -390,6 +406,100 @@ class SmartSplitOptions:
     enabled: bool = True
     target_chunk_duration_s: float = MAX_SMART_CHUNK_DURATION_S
     split_window_factor: float = 0.4
+
+
+class _LazyCT2RescueBackend:
+    """Create at most one reusable CT2 rescue backend on first demand."""
+
+    def __init__(self, factory: Callable[[], WhisperBackend]) -> None:
+        self._factory = factory
+        self._backend: WhisperBackend | None = None
+        self._creation_failed = False
+
+    def get(self) -> WhisperBackend:
+        if self._backend is not None:
+            return self._backend
+        if self._creation_failed:
+            raise RuntimeError("CT2 rescue backend is unavailable")
+        try:
+            self._backend = self._factory()
+        except Exception:
+            self._creation_failed = True
+            raise
+        assert self._backend is not None
+        return self._backend
+
+    def close(self) -> None:
+        backend = self._backend
+        self._backend = None
+        if backend is not None:
+            backend.close()
+
+
+def _validate_ct2_rescue_candidate(
+    result: Any,
+    *,
+    chunk_duration: float,
+    outer_vad_has_speech: bool,
+    outer_vad_speech_ranges: list[tuple[float, float]],
+) -> tuple[bool, str]:
+    """Apply the minimal structural acceptance gate for one CT2 chunk."""
+    if not isinstance(result, BackendResult) or result.backend != "ct2":
+        return False, "ct2_invalid_result"
+    if isinstance(result.duration, bool) or not isinstance(result.duration, (int, float)):
+        return False, "ct2_invalid_result"
+    if not math.isfinite(float(result.duration)) or float(result.duration) < 0.0:
+        return False, "ct2_invalid_result"
+    if not isinstance(result.segments, list):
+        return False, "ct2_invalid_result"
+    if outer_vad_has_speech and not any(
+        isinstance(segment, BackendSegment) and isinstance(segment.text, str) and bool(segment.text.strip())
+        for segment in result.segments
+    ):
+        return False, "ct2_empty_output"
+
+    tolerance = 1 / WHISPER_SAMPLING_RATE
+    previous_start = -math.inf
+    previous_end = -math.inf
+    loop_segments: list[dict[str, Any]] = []
+    for segment in result.segments:
+        if not isinstance(segment, BackendSegment) or not isinstance(segment.text, str) or not segment.text.strip():
+            return False, "ct2_invalid_segment"
+        if isinstance(segment.start, bool) or isinstance(segment.end, bool):
+            return False, "ct2_invalid_timestamp"
+        if not isinstance(segment.start, (int, float)) or not isinstance(segment.end, (int, float)):
+            return False, "ct2_invalid_timestamp"
+        start = float(segment.start)
+        end = float(segment.end)
+        if not math.isfinite(start) or not math.isfinite(end):
+            return False, "ct2_invalid_timestamp"
+        if start < 0.0 or end <= start or end > chunk_duration + tolerance:
+            return False, "ct2_invalid_timestamp"
+        if start + tolerance < previous_start or end + tolerance < previous_end:
+            return False, "ct2_invalid_timestamp"
+        previous_start = start
+        previous_end = end
+        loop_segments.append({"start": start, "end": end, "text": segment.text})
+
+    if outer_vad_has_speech:
+        tail_segment = result.segments[-1]
+        tail_start = float(tail_segment.start)
+        tail_end = float(tail_segment.end)
+        tail_duration = tail_end - tail_start
+        tail_speech_overlap = sum(
+            max(0.0, min(tail_end, speech_end) - max(tail_start, speech_start))
+            for speech_start, speech_end in outer_vad_speech_ranges
+        )
+        required_tail_overlap = min(
+            _CT2_TAIL_MIN_SPEECH_OVERLAP_S,
+            tail_duration * _CT2_TAIL_MIN_SPEECH_OVERLAP_RATIO,
+        )
+        if tail_speech_overlap + tolerance < required_tail_overlap:
+            return False, "ct2_tail_without_speech_support"
+
+    if detect_high_confidence_loops(loop_segments, duration=chunk_duration).loop_detected:
+        return False, "ct2_hard_loop"
+    return True, "ct2_rescue_accepted"
 
 
 def _normalize_merge_text(text: str) -> str:
@@ -741,6 +851,8 @@ class Inference:
             "beam_size": 1,
             "condition_on_previous_text": False,
             "word_timestamps": False,
+            "mlx_sampling_seed": MLX_SAMPLING_SEED_DEFAULT,
+            **MLX_PROJECT_FLAG_DEFAULTS,
         }
 
         segment_merge_options = SegmentMergeOptions()
@@ -773,6 +885,22 @@ class Inference:
                 config = dict(**ChainMap(file_config, config))
 
         config["task"] = _normalize_whisper_task(args.task if args.task is not None else config.get("task"))
+        for name, default in MLX_PROJECT_FLAG_DEFAULTS.items():
+            config[name] = _coerce_bool(config.get(name), default=default)
+        sampling_seed = config.get("mlx_sampling_seed", MLX_SAMPLING_SEED_DEFAULT)
+        if isinstance(sampling_seed, bool):
+            raise ValueError("mlx_sampling_seed must be an integer between 0 and 2**32 - 1")
+        try:
+            normalized_seed = int(sampling_seed)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("mlx_sampling_seed must be an integer between 0 and 2**32 - 1") from exc
+        if (
+            (isinstance(sampling_seed, float) and sampling_seed != normalized_seed)
+            or (isinstance(sampling_seed, str) and sampling_seed.strip() != str(normalized_seed))
+            or not 0 <= normalized_seed <= 2**32 - 1
+        ):
+            raise ValueError("mlx_sampling_seed must be an integer between 0 and 2**32 - 1")
+        config["mlx_sampling_seed"] = normalized_seed
 
         # Process VAD parameters from config file
         if "vad_parameters" in config:
@@ -1026,6 +1154,23 @@ class Inference:
 
         return audio, chunks, duration_after_vad, spans
 
+    def _create_ct2_rescue_backend(self) -> WhisperBackend:
+        if self.profile is None:
+            raise RuntimeError("Inference profile was not initialized")
+        selection = select_backend(
+            "ct2",
+            self.profile,
+            variant=None,
+            model_path=None,
+        )
+        return create_backend(
+            selection,
+            device=selection.device or "cpu",
+            compute_type="int8",
+            cpu_threads=self.cpu_threads,
+            enable_batching=False,
+        )
+
     def _backend_request(self, audio: Any, config: dict[str, Any]) -> BackendRequest:
         profile = getattr(self, "profile", None)
         return BackendRequest(
@@ -1034,6 +1179,13 @@ class Inference:
             task=str(config.get("task", profile.task if profile else "translate")),
             options=config,
         )
+
+    def _ct2_rescue_request(self, audio: Any, config: dict[str, Any]) -> BackendRequest:
+        options = {name: value for name, value in config.items() if not name.startswith("mlx_")}
+        for name in ("fp16", "sample_len", "verbose", "clip_timestamps", "vad_parameters"):
+            options.pop(name, None)
+        options["vad_filter"] = False
+        return self._backend_request(audio, options)
 
     @staticmethod
     def _convert_backend_segments(
@@ -1072,10 +1224,29 @@ class Inference:
             )
         )
 
+    def _log_backend_diagnostics(self, result: BackendResult) -> None:
+        if result.backend != "mlx" or not result.diagnostics:
+            return
+        debug = _coerce_bool(
+            self.generation_config.get("mlx_debug_diagnostics"),
+            default=MLX_PROJECT_FLAG_DEFAULTS["mlx_debug_diagnostics"],
+        )
+        events = build_mlx_diagnostic_events(
+            diagnostics=result.diagnostics,
+            metrics=result.metrics,
+            duration=result.duration,
+            segment_count=len(result.segments),
+            debug=debug,
+        )
+        for event in events:
+            logger.info(serialize_mlx_diagnostic_event(event))
+
     def _transcribe_smart_chunks(
         self,
         backend: WhisperBackend,
         task: InferenceTask,
+        *,
+        ct2_rescue_holder: _LazyCT2RescueBackend | None = None,
     ) -> tuple[list[Segment], BackendResult]:
         audio, chunks, outer_duration_after_vad, speech_spans = self._plan_smart_chunks(task.audio_path)
         duration = len(audio) / WHISPER_SAMPLING_RATE
@@ -1084,6 +1255,13 @@ class Inference:
         config["vad_filter"] = bool(config.get("vad_filter", True))
         config.setdefault("beam_size", 1)
         config.setdefault("condition_on_previous_text", False)
+        is_mlx = getattr(self, "backend_name", None) == "mlx"
+        use_outer_vad_clips = False
+        if is_mlx:
+            use_outer_vad_clips = _coerce_bool(
+                config.pop("mlx_use_outer_vad_clips", None),
+                default=False,
+            )
 
         if outer_duration_after_vad == 0:
             logger.info(_("info.no_speech_detected", path=task.audio_path))
@@ -1098,6 +1276,7 @@ class Inference:
 
         segments: list[Segment] = []
         normalized_backend_segments: list[BackendSegment] = []
+        chunk_diagnostics: list[dict[str, Any]] = []
         inner_duration_after_vad = 0.0
         has_inner_duration = False
         metrics: dict[str, float] = {"chunk_count": 0.0}
@@ -1107,23 +1286,26 @@ class Inference:
             end_sample = max(start_sample, min(len(audio), int(round(chunk.end * WHISPER_SAMPLING_RATE))))
             if end_sample <= start_sample:
                 continue
+            speech_overlaps: list[tuple[float, float]] = []
+            for span in speech_spans:
+                overlap_start = max(chunk.start, span.start)
+                overlap_end = min(chunk.end, span.end)
+                if overlap_end > overlap_start:
+                    speech_overlaps.append((overlap_start, overlap_end))
+            if is_mlx and not speech_overlaps:
+                logger.debug("Skipping MLX chunk %s with no outer-VAD speech", chunk.index + 1)
+                continue
             chunk_audio = audio[start_sample:end_sample]
             chunk_config = dict(config)
-            if getattr(self, "backend_name", None) == "mlx" and speech_spans:
+            if is_mlx and use_outer_vad_clips:
                 clip_timestamps: list[float] = []
-                for span in speech_spans:
-                    overlap_start = max(chunk.start, span.start)
-                    overlap_end = min(chunk.end, span.end)
-                    if overlap_end > overlap_start:
-                        clip_timestamps.extend(
-                            [
-                                max(0.0, overlap_start - chunk.start),
-                                max(0.0, overlap_end - chunk.start),
-                            ]
-                        )
-                if not clip_timestamps:
-                    logger.debug("Skipping MLX chunk %s with no outer-VAD speech", chunk.index + 1)
-                    continue
+                for overlap_start, overlap_end in speech_overlaps:
+                    clip_timestamps.extend(
+                        [
+                            max(0.0, overlap_start - chunk.start),
+                            max(0.0, overlap_end - chunk.start),
+                        ]
+                    )
                 chunk_config["clip_timestamps"] = clip_timestamps
             logger.debug(
                 "Smart VAD chunk %s/%s: %s --> %s",
@@ -1133,16 +1315,97 @@ class Inference:
                 SubWriter.srt_timestamp(int(round(chunk.end * 1_000))),
             )
             metrics["chunk_count"] += 1.0
-            chunk_result = backend.transcribe(self._backend_request(chunk_audio, chunk_config))
+            mlx_result = backend.transcribe(self._backend_request(chunk_audio, chunk_config))
             self._warn_ignored_backend_options(backend)
-            if chunk_result.duration_after_vad is not None:
-                inner_duration_after_vad += chunk_result.duration_after_vad
-                has_inner_duration = True
-            for name, value in chunk_result.metrics.items():
+            self._log_backend_diagnostics(mlx_result)
+            for name, value in mlx_result.metrics.items():
                 if name in {"batch_size", "ignored_option_count", "peak_memory_bytes"}:
                     metrics[name] = max(metrics.get(name, 0.0), value)
                 else:
                     metrics[name] = metrics.get(name, 0.0) + value
+
+            chunk_result = mlx_result
+            rescue_diagnostics: dict[str, Any] | None = None
+            if is_mlx:
+                rescue_decision = decide_ct2_rescue(
+                    mlx_result,
+                    mlx_result.diagnostics,
+                    outer_vad_has_speech=bool(speech_overlaps),
+                    ct2_rescue_already_attempted=False,
+                )
+                rescue_diagnostics = {
+                    "triggered": rescue_decision.should_rescue,
+                    "trigger_reason": rescue_decision.reason,
+                    "attempted": False,
+                    "accepted": False,
+                    "reason": rescue_decision.reason,
+                }
+                if rescue_decision.should_rescue:
+                    metrics["ct2_rescue_trigger_count"] = metrics.get("ct2_rescue_trigger_count", 0.0) + 1.0
+                    if ct2_rescue_holder is None:
+                        rescue_diagnostics["reason"] = "ct2_backend_unavailable"
+                        metrics["ct2_rescue_reject_count"] = metrics.get("ct2_rescue_reject_count", 0.0) + 1.0
+                        logger.warning("CT2 rescue backend unavailable for chunk %s", chunk.index + 1)
+                    else:
+                        try:
+                            ct2_backend = ct2_rescue_holder.get()
+                        except Exception as exc:
+                            rescue_diagnostics["reason"] = "ct2_backend_unavailable"
+                            metrics["ct2_rescue_reject_count"] = metrics.get("ct2_rescue_reject_count", 0.0) + 1.0
+                            logger.warning("CT2 rescue backend unavailable for chunk %s: %s", chunk.index + 1, exc)
+                        else:
+                            rescue_diagnostics["attempted"] = True
+                            metrics["ct2_rescue_call_count"] = metrics.get("ct2_rescue_call_count", 0.0) + 1.0
+                            try:
+                                ct2_result = ct2_backend.transcribe(self._ct2_rescue_request(chunk_audio, chunk_config))
+                            except Exception as exc:
+                                rescue_diagnostics["reason"] = "ct2_inference_failed"
+                                metrics["ct2_rescue_reject_count"] = metrics.get("ct2_rescue_reject_count", 0.0) + 1.0
+                                logger.warning("CT2 rescue failed for chunk %s: %s", chunk.index + 1, exc)
+                            else:
+                                accepted, reason = _validate_ct2_rescue_candidate(
+                                    ct2_result,
+                                    chunk_duration=len(chunk_audio) / WHISPER_SAMPLING_RATE,
+                                    outer_vad_has_speech=bool(speech_overlaps),
+                                    outer_vad_speech_ranges=[
+                                        (overlap_start - chunk.start, overlap_end - chunk.start)
+                                        for overlap_start, overlap_end in speech_overlaps
+                                    ],
+                                )
+                                if isinstance(ct2_result, BackendResult) and isinstance(ct2_result.metrics, dict):
+                                    for name, value in ct2_result.metrics.items():
+                                        metric_name = f"ct2_rescue_{name}"
+                                        if name in {"batch_size", "ignored_option_count", "peak_memory_bytes"}:
+                                            metrics[metric_name] = max(metrics.get(metric_name, 0.0), value)
+                                        else:
+                                            metrics[metric_name] = metrics.get(metric_name, 0.0) + value
+                                rescue_diagnostics["accepted"] = accepted
+                                rescue_diagnostics["reason"] = reason
+                                if accepted:
+                                    chunk_result = ct2_result
+                                    metrics["ct2_rescue_accept_count"] = (
+                                        metrics.get("ct2_rescue_accept_count", 0.0) + 1.0
+                                    )
+                                    logger.info("CT2 rescue accepted for chunk %s: %s", chunk.index + 1, reason)
+                                else:
+                                    metrics["ct2_rescue_reject_count"] = (
+                                        metrics.get("ct2_rescue_reject_count", 0.0) + 1.0
+                                    )
+                                    logger.info("CT2 rescue rejected for chunk %s: %s", chunk.index + 1, reason)
+
+            if mlx_result.diagnostics or rescue_diagnostics is not None:
+                chunk_record: dict[str, Any] = {
+                    "chunk_index": chunk.index,
+                    "chunk_start": chunk.start,
+                    "chunk_end": chunk.end,
+                    "diagnostics": mlx_result.diagnostics,
+                }
+                if rescue_diagnostics is not None:
+                    chunk_record["ct2_rescue"] = rescue_diagnostics
+                chunk_diagnostics.append(chunk_record)
+            if mlx_result.duration_after_vad is not None:
+                inner_duration_after_vad += mlx_result.duration_after_vad
+                has_inner_duration = True
             chunk_offset_ms = int(round(chunk.start * 1_000))
             chunk_end_ms = int(round(chunk.end * 1_000))
             converted = self._convert_backend_segments(
@@ -1172,6 +1435,7 @@ class Inference:
             language=config.get("language"),
             backend=getattr(self, "backend_name", None) or "unknown",
             metrics=metrics,
+            diagnostics={"chunks": chunk_diagnostics} if chunk_diagnostics else {},
         )
 
     def _log_duration(self, duration: float, duration_after_vad: float) -> None:
@@ -1210,6 +1474,7 @@ class Inference:
         logger.info(_("info.loading_whisper"))
 
         backend: WhisperBackend | None = None
+        ct2_rescue_holder: _LazyCT2RescueBackend | None = None
         try:
             if self.backend_selection is None:
                 raise RuntimeError("Backend selection was not initialized")
@@ -1222,6 +1487,8 @@ class Inference:
                 batch_size=self.batch_size,
                 max_batch_size=self.max_batch_size,
             )
+            if self.backend_selection.selected == "mlx":
+                ct2_rescue_holder = _LazyCT2RescueBackend(self._create_ct2_rescue_backend)
             if self.backend_selection.fallback_reason:
                 logger.warning(
                     _(
@@ -1253,7 +1520,11 @@ class Inference:
                 )
 
                 if self._should_use_smart_split():
-                    segments, result = self._transcribe_smart_chunks(backend, task)
+                    segments, result = self._transcribe_smart_chunks(
+                        backend,
+                        task,
+                        ct2_rescue_holder=ct2_rescue_holder,
+                    )
                 else:
                     audio_input, transcription_config, manual_duration_after_vad = self._prepare_transcription(
                         task.audio_path,
@@ -1280,7 +1551,9 @@ class Inference:
                             language=result.language,
                             backend=result.backend,
                             metrics=result.metrics,
+                            diagnostics=result.diagnostics,
                         )
+                    self._log_backend_diagnostics(result)
                     segments = self._convert_backend_segments(result.segments)
                     for segment in segments:
                         logger.debug(
@@ -1317,6 +1590,8 @@ class Inference:
                 )
 
         finally:
+            if ct2_rescue_holder is not None:
+                ct2_rescue_holder.close()
             if backend is not None:
                 backend.close()
             # Clean up VAD injection
