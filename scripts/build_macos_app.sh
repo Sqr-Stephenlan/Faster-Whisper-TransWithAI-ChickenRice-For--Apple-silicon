@@ -3,7 +3,11 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-SOURCE="$ROOT/macos_app/AITranslateLauncher.swift"
+APP_SOURCES=(
+  "$ROOT/macos_app/AITranslateLauncher.swift"
+  "$ROOT/macos_app/LauncherModels.swift"
+  "$ROOT/macos_app/BackendProbeRunner.swift"
+)
 ICON_SOURCE="$ROOT/macos_app/AppIcon.svg"
 ICON_RENDERER_SOURCE="$ROOT/macos_app/AppIconRenderer.swift"
 APP_DIR="$ROOT/AI语音翻译.app"
@@ -26,10 +30,12 @@ if ! SWIFTC="$(xcrun --find swiftc 2>/dev/null)"; then
   exit 1
 fi
 
-if [[ ! -f "$SOURCE" ]]; then
-  echo "错误：未找到 Swift 源码：$SOURCE" >&2
-  exit 1
-fi
+for source in "${APP_SOURCES[@]}"; do
+  if [[ ! -f "$source" ]]; then
+    echo "错误：未找到 Swift 源码：$source" >&2
+    exit 1
+  fi
+done
 
 if [[ ! -f "$ICON_SOURCE" ]]; then
   echo "错误：未找到图标源文件：$ICON_SOURCE" >&2
@@ -65,7 +71,7 @@ mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
   -target arm64-apple-macos13.0 \
   -framework AppKit \
   -framework SwiftUI \
-  "$SOURCE" \
+  "${APP_SOURCES[@]}" \
   -o "$EXECUTABLE"
 
 chmod 755 "$EXECUTABLE"
@@ -106,9 +112,9 @@ cat >"$PLIST" <<'PLIST'
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.1.0</string>
+    <string>1.2.0</string>
     <key>CFBundleVersion</key>
-    <string>3</string>
+    <string>4</string>
     <key>LSMinimumSystemVersion</key>
     <string>13.0</string>
     <key>NSAppleEventsUsageDescription</key>
@@ -130,4 +136,4 @@ mv "$BUILD_APP" "$APP_DIR"
 
 echo
 echo "已生成：$APP_DIR"
-echo "使用方法：双击 AI语音翻译.app，拖入音视频或文件夹，然后点击“开始翻译”。"
+echo "使用方法：双击 AI语音翻译.app，选择 CPU 或 GPU，拖入音视频或文件夹，然后开始翻译。"

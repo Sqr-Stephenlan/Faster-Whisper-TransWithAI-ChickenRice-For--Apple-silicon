@@ -68,12 +68,13 @@ models/
 推荐使用项目根目录的图形入口：
 
 1. 双击 `AI语音翻译.app`。
-2. 拖入一个或多个音视频文件、文件夹，或点击拖拽区域选择。
-3. 在拖拽区下方选择输出字幕格式；默认 SRT、VTT、LRC 全选，且至少保留一种。
-4. 确认列表后点击“开始翻译”。
-5. 在自动打开的 Terminal 中查看处理状态。
+2. 等待 App 离线检查 CT2 与 MLX 环境。不可用的设备会被禁用，可点击“查看详情”读取 Python probe 返回的原始诊断。
+3. 选择 CPU（CTranslate2 `int8`）或 GPU（MLX / Metal FP16）。没有历史选择且 GPU 可用时默认推荐 GPU；主动选择会按翻译任务持久化。
+4. 拖入一个或多个音视频文件、文件夹，或点击拖拽区域选择。
+5. 选择输出字幕格式；默认 SRT、VTT、LRC 全选，且至少保留一种。
+6. 点击“开始 CPU 翻译”或“开始 GPU 翻译”，在自动打开的 Terminal 中查看处理状态。
 
-当前 `AI语音翻译.app` 仍使用稳定的 CT2 CPU 翻译入口；App UI 分支可直接消费本分支提供的 `--backend`、profile 探测和标准错误信息。
+App 只提供显式 CPU / GPU 选项，不暴露 `auto`。GPU 启动后若 MLX 预检或推理失败，会在 Terminal 中明确退出，不会静默改用 CPU。可使用“重新检测”刷新本地环境状态；probe 即使以退出码 1 表示全部后端不可用，只要 stdout 是有效 schema version 1 JSON，App 仍会正常展示两个后端的不可用原因。
 
 字幕默认写入源文件旁。已存在的所选格式按现有规则跳过，只补写缺失的所选格式；本次未选择的格式不会生成。`AI语音翻译.app` 必须留在本项目根目录中与 `.venv`、`models` 和启动脚本配套使用，不要单独移动到 `/Applications`。
 
@@ -141,6 +142,7 @@ python modal_infer.py
 
 ```bash
 ./dev.sh pytest
+./scripts/test_macos_app_logic.sh
 ./dev.sh ruff check .
 ./dev.sh ruff format --check .
 ./dev.sh mypy --config-file pyproject.toml src infer.py download_models.py modal_infer.py scripts

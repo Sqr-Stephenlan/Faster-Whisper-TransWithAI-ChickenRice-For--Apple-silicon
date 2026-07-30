@@ -30,14 +30,16 @@ struct LauncherView: View {
     @ObservedObject var viewModel: LauncherViewModel
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
+        VStack(alignment: .leading, spacing: 14) {
             VStack(alignment: .leading, spacing: 4) {
                 Text("AI 语音翻译")
                     .font(.system(size: 25, weight: .semibold))
-                Text("本地 Apple Silicon CPU 翻译")
+                Text(viewModel.subtitleText)
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
             }
+
+            backendSection
 
             ZStack {
                 RoundedRectangle(cornerRadius: 12)
@@ -65,7 +67,7 @@ struct LauncherView: View {
                     onTargetedChange: { viewModel.isDropTargeted = $0 }
                 )
             }
-            .frame(height: 132)
+            .frame(height: 112)
 
             HStack(alignment: .center, spacing: 10) {
                 Text("输出字幕格式")
@@ -86,7 +88,7 @@ struct LauncherView: View {
                     Text("尚未选择文件或文件夹")
                         .foregroundStyle(.secondary)
                 } else {
-                    ForEach(Array(viewModel.selectedURLs.prefix(5).enumerated()), id: \.element.path) { _, url in
+                    ForEach(Array(viewModel.selectedURLs.prefix(4).enumerated()), id: \.element.path) { _, url in
                         HStack(spacing: 6) {
                             Image(systemName: viewModel.isDirectory(url) ? "folder" : "doc")
                                 .foregroundStyle(.secondary)
@@ -95,13 +97,13 @@ struct LauncherView: View {
                                 .truncationMode(.middle)
                         }
                     }
-                    if viewModel.selectedURLs.count > 5 {
-                        Text("另有 \(viewModel.selectedURLs.count - 5) 项……")
+                    if viewModel.selectedURLs.count > 4 {
+                        Text("另有 \(viewModel.selectedURLs.count - 4) 项……")
                             .foregroundStyle(.secondary)
                     }
                 }
             }
-            .frame(maxWidth: .infinity, minHeight: 58, alignment: .topLeading)
+            .frame(maxWidth: .infinity, minHeight: 52, alignment: .topLeading)
 
             HStack {
                 Button("清除", action: viewModel.clear)
@@ -114,13 +116,14 @@ struct LauncherView: View {
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }
-                Button("开始翻译", action: viewModel.startTranslation)
+                Button(viewModel.startButtonTitle, action: viewModel.startInference)
                     .keyboardShortcut(.defaultAction)
-                    .disabled(viewModel.selectedURLs.isEmpty || viewModel.isLaunching)
+                    .disabled(!viewModel.canStart)
             }
         }
-        .padding(24)
-        .frame(width: 520, height: 416)
+        .padding(22)
+        .frame(width: 560, height: 590)
+        .onAppear(perform: viewModel.probeIfNeeded)
         .alert(
             "提示",
             isPresented: Binding(
@@ -134,6 +137,140 @@ struct LauncherView: View {
         } message: {
             Text(viewModel.alertMessage ?? "")
         }
+        .sheet(item: $viewModel.diagnosticDetails) { details in
+            DiagnosticDetailsView(details: details)
+        }
+    }
+
+    private var backendSection: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack {
+                Text("运行设备")
+                    .font(.headline)
+                Spacer()
+                if viewModel.isProbing {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("正在检测")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Button("重新检测", action: viewModel.refreshProbe)
+                    .buttonStyle(.link)
+                    .disabled(viewModel.isProbing || viewModel.isLaunching)
+            }
+
+            HStack(alignment: .top, spacing: 12) {
+                backendCard(.ct2)
+                backendCard(.mlx)
+            }
+
+            if let failure = viewModel.probeFailure {
+                HStack(spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                    Text(failure.summary)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button("查看详情", action: viewModel.showProbeFailureDetails)
+                        .buttonStyle(.link)
+                        .font(.caption)
+                }
+            }
+        }
+    }
+
+    private func backendCard(_ backend: InferenceBackend) -> some View {
+        let isSelected = viewModel.selectedBackend == backend
+        let isAvailable = viewModel.availability(for: backend)?.available == true
+
+        return VStack(alignment: .leading, spacing: 7) {
+            Button {
+                viewModel.selectBackend(backend)
+            } label: {
+                VStack(alignment: .leading, spacing: 7) {
+                    HStack(spacing: 8) {
+                        Text(backend.displayName)
+                            .font(.headline)
+                        Spacer()
+                        if backend == .mlx, isAvailable {
+                            Text("推荐")
+                                .font(.caption2.weight(.semibold))
+                                .padding(.horizontal, 7)
+                                .padding(.vertical, 3)
+                                .foregroundStyle(Color.accentColor)
+                                .background(Color.accentColor.opacity(0.12), in: Capsule())
+                        }
+                    }
+
+                    Text(viewModel.backendTechnicalDescription(backend))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    HStack(spacing: 6) {
+                        backendStatusIcon(backend)
+                        Text(viewModel.backendStatusText(backend))
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(backendStatusColor(backend))
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(!viewModel.canSelectBackend(backend))
+
+            if viewModel.shouldShowBackendDetailsButton(backend) {
+                HStack {
+                    Text("当前不可用")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button("查看详情") {
+                        viewModel.showBackendDetails(backend)
+                    }
+                    .buttonStyle(.link)
+                    .font(.caption)
+                }
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, minHeight: 102, alignment: .topLeading)
+        .background {
+            RoundedRectangle(cornerRadius: 11)
+                .fill(isSelected ? Color.accentColor.opacity(0.10) : Color.secondary.opacity(0.055))
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: 11)
+                .strokeBorder(
+                    isSelected ? Color.accentColor : Color.secondary.opacity(0.35),
+                    lineWidth: isSelected ? 2 : 1
+                )
+        }
+        .opacity(viewModel.isBackendReadable(backend) ? 1 : 0.72)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(backend.displayName)，\(viewModel.backendTechnicalDescription(backend))")
+        .accessibilityValue(viewModel.backendStatusText(backend))
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
+    }
+
+    @ViewBuilder
+    private func backendStatusIcon(_ backend: InferenceBackend) -> some View {
+        if viewModel.isProbing {
+            ProgressView()
+                .controlSize(.mini)
+        } else {
+            Image(systemName: viewModel.backendStatusSymbol(backend))
+                .foregroundStyle(backendStatusColor(backend))
+        }
+    }
+
+    private func backendStatusColor(_ backend: InferenceBackend) -> Color {
+        guard let availability = viewModel.availability(for: backend) else {
+            return viewModel.probeFailure == nil ? .secondary : .orange
+        }
+        return availability.available ? .green : .orange
     }
 
     private func subtitleFormatTag(_ format: SubtitleFormat) -> some View {
@@ -173,21 +310,233 @@ struct LauncherView: View {
     }
 }
 
+private struct DiagnosticDetailsView: View {
+    let details: DiagnosticDetails
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text(details.title)
+                .font(.title2.weight(.semibold))
+
+            ScrollView {
+                Text(details.message)
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+                    .textSelection(.enabled)
+            }
+
+            HStack {
+                Spacer()
+                Button("关闭") {
+                    dismiss()
+                }
+                .keyboardShortcut(.cancelAction)
+            }
+        }
+        .padding(22)
+        .frame(width: 540, height: 340)
+    }
+}
+
+struct DiagnosticDetails: Identifiable {
+    let id = UUID()
+    let title: String
+    let message: String
+}
+
 @MainActor
 final class LauncherViewModel: ObservableObject {
     @Published var selectedURLs: [URL] = []
     @Published var selectedSubtitleFormats: Set<SubtitleFormat> = Set(SubtitleFormat.allCases)
+    @Published var selectedBackend: InferenceBackend?
+    @Published var probeState: ProbeState = .idle
     @Published var isDropTargeted = false
     @Published var isLaunching = false
     @Published var alertMessage: String?
+    @Published var diagnosticDetails: DiagnosticDetails?
 
     private let fileManager = FileManager.default
+    private let task: InferenceTask = .translate
+    private let probeRunner = BackendProbeRunner()
+    private let userDefaults = UserDefaults.standard
+
+    var subtitleText: String {
+        switch probeState {
+        case .idle, .probing:
+            return "正在检查本地推理环境…"
+        case .failed:
+            return "本地推理环境未就绪"
+        case .ready(let report, _):
+            guard InferenceBackend.allCases.contains(where: report.isAvailable) else {
+                return "本地推理环境未就绪"
+            }
+            switch selectedBackend {
+            case .ct2:
+                return "日译中 · CPU 兼容模式"
+            case .mlx:
+                return "日译中 · MLX Metal 加速"
+            case nil:
+                return "日译中 · 请选择运行设备"
+            }
+        }
+    }
+
+    var startButtonTitle: String {
+        switch selectedBackend {
+        case .ct2:
+            return "开始 CPU 翻译"
+        case .mlx:
+            return "开始 GPU 翻译"
+        case nil:
+            return "开始翻译"
+        }
+    }
+
+    var isProbing: Bool {
+        if case .probing = probeState {
+            return true
+        }
+        return false
+    }
+
+    var probeFailure: ProbeFailure? {
+        if case .failed(let failure) = probeState {
+            return failure
+        }
+        return nil
+    }
+
+    var canStart: Bool {
+        guard
+            !selectedURLs.isEmpty,
+            !selectedSubtitleFormats.isEmpty,
+            !isLaunching,
+            let selectedBackend,
+            let report = readyReport
+        else {
+            return false
+        }
+        return report.isAvailable(selectedBackend)
+    }
 
     var subtitleFormatsArgument: String {
         SubtitleFormat.allCases
             .filter(selectedSubtitleFormats.contains)
             .map(\.rawValue)
             .joined(separator: ",")
+    }
+
+    private var readyReport: BackendProbeReport? {
+        if case .ready(let report, _) = probeState {
+            return report
+        }
+        return nil
+    }
+
+    private var projectRoot: URL {
+        Bundle.main.bundleURL.deletingLastPathComponent()
+    }
+
+    func probeIfNeeded() {
+        guard case .idle = probeState else { return }
+        refreshProbe()
+    }
+
+    func refreshProbe() {
+        guard !isProbing, !isLaunching else { return }
+
+        probeState = .probing
+        probeRunner.probe(projectRoot: projectRoot, task: task) { [weak self] result in
+            Task { @MainActor in
+                self?.handleProbeResult(result)
+            }
+        }
+    }
+
+    func availability(for backend: InferenceBackend) -> BackendAvailability? {
+        readyReport?.availability(for: backend)
+    }
+
+    func canSelectBackend(_ backend: InferenceBackend) -> Bool {
+        !isLaunching && availability(for: backend)?.available == true
+    }
+
+    func isBackendReadable(_ backend: InferenceBackend) -> Bool {
+        if isProbing {
+            return true
+        }
+        return availability(for: backend)?.available != false
+    }
+
+    func backendTechnicalDescription(_ backend: InferenceBackend) -> String {
+        switch backend {
+        case .ct2:
+            return "CTranslate2 · int8"
+        case .mlx:
+            return "MLX · Metal · FP16"
+        }
+    }
+
+    func backendStatusText(_ backend: InferenceBackend) -> String {
+        if isProbing {
+            return "检查中…"
+        }
+        if let availability = availability(for: backend) {
+            return availability.available ? "可用" : "当前不可用"
+        }
+        if probeFailure != nil {
+            return "无法检测"
+        }
+        return "等待检测"
+    }
+
+    func backendStatusSymbol(_ backend: InferenceBackend) -> String {
+        guard let availability = availability(for: backend) else {
+            return probeFailure == nil ? "circle.dotted" : "exclamationmark.triangle.fill"
+        }
+        return availability.available ? "checkmark.circle.fill" : "exclamationmark.triangle.fill"
+    }
+
+    func shouldShowBackendDetailsButton(_ backend: InferenceBackend) -> Bool {
+        guard let availability = availability(for: backend) else { return false }
+        return !availability.available
+    }
+
+    func selectBackend(_ backend: InferenceBackend) {
+        guard canSelectBackend(backend) else { return }
+        selectedBackend = backend
+        userDefaults.set(backend.rawValue, forKey: task.backendPreferenceKey)
+    }
+
+    func showBackendDetails(_ backend: InferenceBackend) {
+        guard let availability = availability(for: backend) else { return }
+
+        let reasons = availability.reasons.isEmpty
+            ? "未提供额外诊断。"
+            : availability.reasons.map { "• \($0)" }.joined(separator: "\n")
+        let device = availability.device ?? "未报告"
+        let status = availability.available ? "可用" : "当前不可用"
+        diagnosticDetails = DiagnosticDetails(
+            title: "\(backend.displayName) 环境详情",
+            message: """
+            后端：\(backend.rawValue)
+            状态：\(status)
+            设备：\(device)
+            模型：\(availability.model.path)
+            模型变体：\(availability.model.variant)
+
+            原始诊断：
+            \(reasons)
+            """
+        )
+    }
+
+    func showProbeFailureDetails() {
+        guard let failure = probeFailure else { return }
+        diagnosticDetails = DiagnosticDetails(
+            title: failure.summary,
+            message: failure.detail
+        )
     }
 
     func isDirectory(_ url: URL) -> Bool {
@@ -266,21 +615,36 @@ final class LauncherViewModel: ObservableObject {
         }
     }
 
-    func startTranslation() {
+    func startInference() {
         guard !selectedURLs.isEmpty, !isLaunching else { return }
+        guard !selectedSubtitleFormats.isEmpty else {
+            alertMessage = "至少选择一种字幕格式。"
+            return
+        }
+        guard let report = readyReport else {
+            refreshProbe()
+            return
+        }
+        guard let selectedBackend, report.isAvailable(selectedBackend) else {
+            alertMessage = "请选择当前可用的运行设备。"
+            return
+        }
+        guard let launcherFilename = launcherFilename(for: selectedBackend) else {
+            alertMessage = "当前任务尚未提供 \(selectedBackend.displayName) 启动入口。"
+            return
+        }
 
-        let projectRoot = Bundle.main.bundleURL.deletingLastPathComponent()
-        let launcherURL = projectRoot.appendingPathComponent("运行(翻译)(CPU).command")
+        let launcherURL = projectRoot.appendingPathComponent(launcherFilename)
         let requiredPaths = [
             launcherURL,
             projectRoot.appendingPathComponent("dev.sh"),
             projectRoot.appendingPathComponent(".venv/bin/python"),
             projectRoot.appendingPathComponent("scripts/macos_launcher.py"),
-            projectRoot.appendingPathComponent("models/translate"),
+            projectRoot.appendingPathComponent("scripts/backend_probe.py"),
         ]
 
         guard requiredPaths.allSatisfy({ fileManager.fileExists(atPath: $0.path) }) else {
-            alertMessage = "未找到项目运行环境。请将“AI语音翻译.app”放回 AI translate 项目根目录，并确认 .venv 和翻译模型已经准备完成。"
+            alertMessage = "未找到项目运行入口。请将“AI语音翻译.app”放回 AI translate 项目根目录，并确认 dev.sh、.venv 和 scripts 目录完整。"
             return
         }
 
@@ -297,8 +661,41 @@ final class LauncherViewModel: ObservableObject {
                 NSApplication.shared.terminate(nil)
             case .failure(let error):
                 self.isLaunching = false
-                self.alertMessage = "无法在 Terminal 中启动翻译：\n\(error.localizedDescription)"
+                self.alertMessage = "无法在 Terminal 中启动 \(selectedBackend.displayName) 翻译：\n\(error.localizedDescription)"
             }
+        }
+    }
+
+    private func handleProbeResult(_ result: Result<BackendProbeReport, ProbeFailure>) {
+        switch result {
+        case .success(let report):
+            probeState = .ready(report, checkedAt: Date())
+            let savedBackend = userDefaults
+                .string(forKey: task.backendPreferenceKey)
+                .flatMap(InferenceBackend.init(rawValue:))
+            let decision = BackendSelectionPolicy.decide(
+                report: report,
+                savedBackend: savedBackend
+            )
+            selectedBackend = decision.selectedBackend
+            if let notice = decision.notice {
+                alertMessage = notice
+            }
+        case .failure(let failure):
+            probeState = .failed(failure)
+        }
+    }
+
+    private func launcherFilename(for backend: InferenceBackend) -> String? {
+        switch (task, backend) {
+        case (.translate, .ct2):
+            return "运行(翻译)(CPU).command"
+        case (.translate, .mlx):
+            return "运行(翻译)(GPU-MLX).command"
+        case (.transcribe, .ct2):
+            return "运行(转录)(CPU).command"
+        case (.transcribe, .mlx):
+            return nil
         }
     }
 }
