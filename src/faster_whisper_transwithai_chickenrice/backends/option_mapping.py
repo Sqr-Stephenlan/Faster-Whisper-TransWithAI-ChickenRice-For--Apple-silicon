@@ -8,6 +8,10 @@ from typing import Any
 from .base import UnsupportedBackendOptionError
 
 PROJECT_OPTIONS = {
+    "mlx_debug_diagnostics",
+    "mlx_sampling_seed",
+    "mlx_safe_retry_without_clips",
+    "mlx_use_outer_vad_clips",
     "segment_merge",
     "smart_split_with_vad",
     "target_chunk_duration_s",

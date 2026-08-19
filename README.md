@@ -30,7 +30,7 @@
 ./dev.sh bootstrap
 ```
 
-CPU 运行依赖来自 `requirements-macos.txt`，并由 `constraints-macos-arm64.txt` 锁定已验证版本。MLX 的附加依赖位于 `requirements-macos-mlx.txt`，正式运行还需安装独立转换项目生成的 `mlx_whisper_runtime_local-0.4.3+runtime.1` wheel；该 wheel 不依赖 PyTorch。测试和静态检查依赖位于 `requirements-dev.txt`。
+CPU 运行依赖来自 `requirements-macos.txt`，并由 `constraints-macos-arm64.txt` 锁定已验证版本。MLX 的附加依赖位于 `requirements-macos-mlx.txt`，正式运行还需安装独立转换项目生成的 `mlx_whisper_runtime_local-0.4.3+runtime.4` wheel；该 wheel 不依赖 PyTorch。测试和静态检查依赖位于 `requirements-dev.txt`。
 
 ## 准备模型
 
@@ -77,6 +77,14 @@ models/
 App 只提供显式 CPU / GPU 选项，不暴露 `auto`。GPU 启动后若 MLX 预检或推理失败，会在 Terminal 中明确退出，不会静默改用 CPU。可使用“重新检测”刷新本地环境状态；probe 即使以退出码 1 表示全部后端不可用，只要 stdout 是有效 schema version 1 JSON，App 仍会正常展示两个后端的不可用原因。
 
 字幕默认写入源文件旁。已存在的所选格式按现有规则跳过，只补写缺失的所选格式；本次未选择的格式不会生成。`AI语音翻译.app` 必须留在本项目根目录中与 `.venv`、`models` 和启动脚本配套使用，不要单独移动到 `/Applications`。
+
+如需在三指捏合后的启动台中找到它，可在 Finder 中双击：
+
+```text
+创建启动台入口.command
+```
+
+脚本会把一个同名 AppleScript 壳应用放入 `~/Applications`，并保留项目内的原 App 不动。如果以后移动了整个项目目录，重新运行该脚本即可更新入口。
 
 如果 App 缺失或 Swift 源码有更新，可重新构建：
 

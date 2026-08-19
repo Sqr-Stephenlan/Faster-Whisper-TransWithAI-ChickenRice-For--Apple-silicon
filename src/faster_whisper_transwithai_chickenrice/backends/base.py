@@ -69,6 +69,7 @@ class BackendResult:
     language: str | None
     backend: str
     metrics: dict[str, float] = field(default_factory=dict)
+    diagnostics: dict[str, Any] = field(default_factory=dict)
 
 
 class WhisperBackend(Protocol):

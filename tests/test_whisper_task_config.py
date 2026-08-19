@@ -31,6 +31,7 @@ from faster_whisper_transwithai_chickenrice.infer import (
     select_best_compute_type,
     vad_segments_to_clip_timestamps,
 )
+from faster_whisper_transwithai_chickenrice.mlx_diagnostics import MLX_EVENT_REQUIRED_FIELDS
 from faster_whisper_transwithai_chickenrice.vad_manager import VadConfig, WhisperVadModel, WhisperVADOnnxWrapper
 
 
@@ -107,6 +108,39 @@ class WhisperTaskConfigTests(unittest.TestCase):
             )
 
         self.assertEqual(config["task"], "translate")
+
+    def test_mlx_feature_flags_have_safe_defaults(self) -> None:
+        config = self.load_config("{}")
+
+        self.assertFalse(config["mlx_use_outer_vad_clips"])
+        self.assertTrue(config["mlx_safe_retry_without_clips"])
+        self.assertFalse(config["mlx_debug_diagnostics"])
+        self.assertEqual(config["mlx_sampling_seed"], 0)
+
+    def test_mlx_feature_flags_are_normalized_as_booleans(self) -> None:
+        config = self.load_config(
+            """
+            {
+                "mlx_use_outer_vad_clips": "true",
+                "mlx_safe_retry_without_clips": "false",
+                "mlx_debug_diagnostics": "true"
+            }
+            """
+        )
+
+        self.assertTrue(config["mlx_use_outer_vad_clips"])
+        self.assertFalse(config["mlx_safe_retry_without_clips"])
+        self.assertTrue(config["mlx_debug_diagnostics"])
+
+    def test_invalid_mlx_feature_flag_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "Expected boolean value"):
+            self.load_config('{"mlx_debug_diagnostics": "sometimes"}')
+
+    def test_mlx_sampling_seed_is_normalized_and_validated(self) -> None:
+        self.assertEqual(self.load_config('{"mlx_sampling_seed": "42"}')["mlx_sampling_seed"], 42)
+        for invalid in ("true", "1.5", "-1", "4294967296"):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(ValueError, "mlx_sampling_seed"):
+                self.load_config(f'{{"mlx_sampling_seed": {invalid}}}')
 
 
 class CpuRuntimePolicyTests(unittest.TestCase):
@@ -348,8 +382,16 @@ class SmartSplitTests(unittest.TestCase):
             segments, info = inference._transcribe_smart_chunks(model, task)
 
         self.assertEqual(len(model.calls), 3)
-        self.assertTrue(all(call_config["vad_filter"] for _length, call_config in model.calls))
-        self.assertNotIn("clip_timestamps", model.calls[0][1])
+        expected_options = {
+            "language": "ja",
+            "task": "translate",
+            "vad_filter": True,
+            "vad_parameters": {"threshold": 0.5},
+            "beam_size": 1,
+            "condition_on_previous_text": False,
+        }
+        self.assertTrue(all(call_config == expected_options for _length, call_config in model.calls))
+        self.assertTrue(all("clip_timestamps" not in call_config for _length, call_config in model.calls))
         self.assertEqual(segments[0], Segment(start=0, end=500, text="chunk 1"))
         self.assertEqual(segments[1], Segment(start=2_000, end=2_500, text="chunk 2"))
         self.assertEqual(segments[2], Segment(start=4_000, end=4_500, text="chunk 3"))
@@ -380,15 +422,59 @@ class SmartSplitTests(unittest.TestCase):
         self.assertEqual(info.duration, 2.0)
         self.assertEqual(info.duration_after_vad, 0)
         model.transcribe.assert_not_called()
-        self.assertTrue(any("No speech detected" in message for message in logs.output))
+        self.assertTrue(any("silence.wav" in message for message in logs.output))
 
-    def test_mlx_smart_chunks_use_outer_vad_clips_and_skip_silent_chunks(self) -> None:
+    def test_mlx_smart_chunks_default_to_full_chunks_and_skip_silent_chunks(self) -> None:
         inference = Inference.__new__(Inference)
         inference.backend_name = "mlx"
         inference.generation_config = {
             "language": "ja",
             "task": "translate",
             "vad_filter": True,
+            "mlx_use_outer_vad_clips": False,
+        }
+        inference.smart_split_options = infer_module.SmartSplitOptions(enabled=True, target_chunk_duration_s=2.0)
+        inference.vad_manager = mock.Mock()
+        inference.vad_manager.get_speech_timestamps.return_value = [
+            {"start": 0, "end": 16_000},
+            {"start": 48_000, "end": 64_000},
+        ]
+
+        class FakeBackend:
+            def __init__(self) -> None:
+                self.calls: list[BackendRequest] = []
+
+            def transcribe(self, request: BackendRequest) -> BackendResult:
+                self.calls.append(request)
+                return BackendResult(
+                    segments=[BackendSegment(start=0.0, end=0.5, text="chunk")],
+                    duration=len(request.audio) / 16_000,
+                    duration_after_vad=None,
+                    language="ja",
+                    backend="mlx",
+                )
+
+        backend = FakeBackend()
+        task = mock.Mock(audio_path="audio.mp3")
+
+        with mock.patch.object(infer_module, "decode_audio", return_value=[0.0] * 80_000):
+            segments, result = inference._transcribe_smart_chunks(backend, task)
+
+        self.assertEqual(len(backend.calls), 2)
+        self.assertEqual([len(call.audio) for call in backend.calls], [32_000, 32_000])
+        self.assertTrue(all("clip_timestamps" not in call.options for call in backend.calls))
+        self.assertTrue(all("mlx_use_outer_vad_clips" not in call.options for call in backend.calls))
+        self.assertEqual(result.metrics["chunk_count"], 2.0)
+        self.assertEqual([segment.start for segment in segments], [0, 2_000])
+
+    def test_mlx_smart_chunks_restore_outer_vad_clips_with_rollback_flag(self) -> None:
+        inference = Inference.__new__(Inference)
+        inference.backend_name = "mlx"
+        inference.generation_config = {
+            "language": "ja",
+            "task": "translate",
+            "vad_filter": True,
+            "mlx_use_outer_vad_clips": True,
         }
         inference.smart_split_options = infer_module.SmartSplitOptions(enabled=True, target_chunk_duration_s=2.0)
         inference.vad_manager = mock.Mock()
@@ -420,8 +506,119 @@ class SmartSplitTests(unittest.TestCase):
         self.assertEqual(len(backend.calls), 2)
         self.assertEqual(backend.calls[0].options["clip_timestamps"], [0.0, 1.0])
         self.assertEqual(backend.calls[1].options["clip_timestamps"], [1.0, 2.0])
+        self.assertTrue(all("mlx_use_outer_vad_clips" not in call.options for call in backend.calls))
         self.assertEqual(result.metrics["chunk_count"], 2.0)
         self.assertEqual([segment.start for segment in segments], [0, 2_000])
+
+
+class StructuredDiagnosticsLoggingTests(unittest.TestCase):
+    @staticmethod
+    def _result(*, anomalous: bool = False) -> BackendResult:
+        runtime_window = {
+            "seek": 0,
+            "segment_size": 32_000,
+            "segment_duration": 2.0,
+            "attempts": [
+                {
+                    "temperature": 0.0,
+                    "compression_ratio": 1.2,
+                    "avg_logprob": -0.3,
+                    "no_speech_prob": 0.01,
+                    "failure_reasons": ["compression_ratio"] if anomalous else [],
+                    "accepted": not anomalous,
+                }
+            ],
+            "fallback_exhausted": anomalous,
+            "final_failure_reasons": ["compression_ratio"] if anomalous else [],
+        }
+        return BackendResult(
+            segments=[BackendSegment(start=0.0, end=1.0, text="结果")],
+            duration=2.0,
+            duration_after_vad=None,
+            language="ja",
+            backend="mlx",
+            metrics={"inference_seconds": 0.5, "peak_memory_bytes": 1_024.0},
+            diagnostics={
+                "sample_count": 32_000,
+                "initial_clip_mode": "full_chunk",
+                "initial": {
+                    "anomaly_detected": anomalous,
+                    "anomaly_reason": "fallback_exhausted" if anomalous else None,
+                    "fallback_exhausted": anomalous,
+                    "loop_detected": False,
+                    "findings": [],
+                    "runtime_diagnostics": {
+                        "schema_version": 1,
+                        "fallback_exhausted": anomalous,
+                        "windows": [runtime_window],
+                    },
+                },
+                "retry": None,
+                "retry_reason": None,
+                "safe_retry_count": 0,
+                "selected_result": "initial",
+                "unresolved_anomaly": anomalous,
+            },
+        )
+
+    @staticmethod
+    def _parse_log_events(log_output: list[str]) -> list[dict[str, object]]:
+        return [json.loads(message[message.index("{") :]) for message in log_output if "{" in message]
+
+    def test_structured_logs_use_json_schema_without_debug_event_by_default(self) -> None:
+        inference = Inference.__new__(Inference)
+        inference.generation_config = {"mlx_debug_diagnostics": False}
+
+        with self.assertLogs(infer_module.logger, level="INFO") as logs:
+            inference._log_backend_diagnostics(self._result(anomalous=True))
+
+        events = self._parse_log_events(logs.output)
+        self.assertIn("mlx_runtime_anomaly", {event["event"] for event in events})
+        self.assertNotIn("mlx_debug_windows", {event["event"] for event in events})
+        self.assertTrue(all(set(MLX_EVENT_REQUIRED_FIELDS).issubset(event) for event in events))
+        self.assertFalse(inference.generation_config["mlx_debug_diagnostics"])
+
+    def test_manual_debug_flag_enables_bounded_window_event(self) -> None:
+        inference = Inference.__new__(Inference)
+        inference.generation_config = {"mlx_debug_diagnostics": True}
+
+        with self.assertLogs(infer_module.logger, level="INFO") as logs:
+            inference._log_backend_diagnostics(self._result())
+
+        events = self._parse_log_events(logs.output)
+        debug_event = next(event for event in events if event["event"] == "mlx_debug_windows")
+        self.assertEqual(len(debug_event["windows"]), 1)
+
+    def test_smart_chunks_emit_request_and_result_summary_per_mlx_request(self) -> None:
+        inference = Inference.__new__(Inference)
+        inference.backend_name = "mlx"
+        inference.generation_config = {
+            "language": "ja",
+            "task": "translate",
+            "vad_filter": True,
+            "mlx_use_outer_vad_clips": False,
+            "mlx_debug_diagnostics": False,
+        }
+        inference._plan_smart_chunks = mock.Mock(
+            return_value=(
+                [0.0] * 64_000,
+                [AudioChunk(0, 0.0, 2.0), AudioChunk(1, 2.0, 4.0)],
+                2.0,
+                [SpeechSpan(0.0, 1.0), SpeechSpan(3.0, 4.0)],
+            )
+        )
+        backend = mock.Mock()
+        backend.ignored_options = ()
+        backend.transcribe.side_effect = [self._result(), self._result()]
+
+        with self.assertLogs(infer_module.logger, level="INFO") as logs:
+            inference._transcribe_smart_chunks(backend, mock.Mock(audio_path="audio.mp3"))
+
+        events = self._parse_log_events(logs.output)
+        event_names = [event["event"] for event in events]
+        self.assertEqual(event_names.count("mlx_request_summary"), 2)
+        self.assertEqual(event_names.count("mlx_result_summary"), 2)
+        self.assertNotIn("mlx_debug_windows", event_names)
 
 
 if __name__ == "__main__":
